@@ -504,6 +504,8 @@ def get_wallx_normal_text(
                 break
 
         assistant_output = f"{role_start_symbol}assistant\n{output_instruction}\n{role_end_symbol}"
+        print("assistant_output:",assistant_output)
+        print("generate_subtask_ratio:",generate_subtask_ratio)
         generate_subtask = True
     else:
         # Generate actions
