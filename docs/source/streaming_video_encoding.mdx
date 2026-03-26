@@ -153,3 +153,160 @@ lerobot-record --dataset.vcodec=h264 --dataset.streaming_encoding=false ...
 
 Performance ultimately depends on your exact setup — frames-per-second, resolution, CPU cores and load, available memory, episode length, and the encoder you choose. Always test with your target workload, be mindful about your CPU & system capabilities and tune `encoder_threads`, `encoder_queue_maxsize`, and
 `vcodec` reasonably. That said, a common practical configuration (for many applications) is three cameras at 640×480x3 @30fps; this usually runs fine with the default streaming video encoding settings in modern systems. Always verify your recorded dataset is healthy by comparing the video duration to the CLI episode duration and confirming the row count equals FPS × CLI duration.
+
+---
+
+# 流式视频编码指南
+
+## 1. 概述
+
+流式视频编码消除了视频数据集录制期间传统的 PNG 往返过程。原来的流程是：
+
+1. 捕获帧 -> 写入PNG到磁盘 -> (在episode结束时) 读取PNG -> 编码为MP4 -> 删除PNG
+
+帧可以在捕获期间实时编码：
+
+1. 捕获帧 -> 队列发送到编码器线程 -> 直接编码为MP4
+
+这使得 `save_episode()` 几乎即时完成（在episode结束时视频已经编码完成），并消除了episode之间发生的阻塞等待，尤其是在使用多个摄像机的长时间episode中。
+
+## 2. 调优参数
+
+| 参数                | CLI标志                          | 类型          | 默认值        | 描述                                                         |
+| ------------------- | --------------------------------- | ------------- | ------------- | ------------------------------------------------------------ |
+| `streaming_encoding`    | `--dataset.streaming_encoding`    | `bool`        | `True`        | 启用捕获期间的实时编码                          |
+| `vcodec`                | `--dataset.vcodec`                | `str`         | `"libsvtav1"` | 视频编解码器。"auto"检测最佳硬件编码器                     |
+| `encoder_threads`       | `--dataset.encoder_threads`       | `int \| None` | `None` (自动) | 每个编码器实例的线程数。`None`将由编解码器决定 |
+| `encoder_queue_maxsize` | `--dataset.encoder_queue_maxsize` | `int`         | `60`          | 每个摄像机的最大缓冲帧数（约2秒@30fps）。消耗RAM       |
+
+## 3. 性能注意事项
+
+流式编码意味着CPU在捕获循环期间**正在**编码视频，而不是之后。这创建了一个必须在以下各方之间共享的CPU预算：
+
+- **控制循环**（读取摄像机、控制机器人、写入非视频数据）
+- **编码器线程**（每个摄像机一个线程池）
+- **Rerun可视化**（如果启用）
+- **操作系统和其他进程**
+
+### 分辨率和摄像机数量的影响
+
+| 设置                     | 吞吐量(px/秒) | CPU编码负载 | 备注                          |
+| ------------------------- | ------------------- | ----------------- | ------------------------------ |
+| 2个摄像头 640x480x3 @30fps   | 55M                 | 低               | 适用于大多数系统          |
+| 2个摄像头 1280x720x3 @30fps  | 165M                | 中等          | 在现代系统上运行舒适  |
+| 2个摄像头 1920x1080x3 @30fps | 373M                | 高               | 需要强大的高端CPU |
+
+### `encoder_threads` 调优
+
+此参数控制每个编码器实例内部使用多少线程：
+
+- **更高的值**（如4-5）：编码更快，但每个摄像机使用更多CPU核心。适用于具有更多核心的高端系统。
+- **更低的值**（如1-2）：每个摄像机占用更少的CPU，释放核心用于捕获和可视化。适用于低分辨率图像和性能足够的CPU。
+- **`None`（默认）**：让编解码器决定。相关信息可在编解码器日志中找到。
+
+### 背压和丢帧
+
+每个摄像机有一个有界队列（`encoder_queue_maxsize`，默认60帧）。当编码器跟不上时：
+
+1. 队列填满（消耗RAM）
+2. 新帧被**丢弃**（不阻塞）——捕获循环继续不中断
+3. 记录警告："Encoder queue full for {camera}, dropped N frame(s)"
+4. 在episode结束时，报告每个摄像机丢弃的总帧数
+
+### 编码器落后的症状
+
+- **系统感觉卡顿和冻结**：所有CPU达到100%
+- **日志中有丢帧警告**或记录的数据集中帧数/FPS低于预期
+- **机器人运动不流畅**：如果CPU严重过载，甚至捕获循环可能受到影响
+- **累积的rerun延迟**：可视化落后于实时
+
+## 4. 硬件加速编码
+
+### 何时使用
+
+在以下情况下使用硬件编码：
+
+- CPU是瓶颈（丢帧、机器人不流畅、rerun延迟）
+- 您有兼容的硬件（GPU或专用编码器）
+- 您正在录制高吞吐量（高分辨率或多个摄像机）
+
+### 选择编解码器
+
+| 编解码器                | CPU使用率 | 文件大小      | 质量 | 备注                                                            |
+| --------------------- | --------- | -------------- | ------- | ---------------------------------------------------------------- |
+| `libsvtav1`（默认）    | 高      | 最小       | 最佳    | 默认。最佳压缩但最消耗CPU                 |
+| `h264`                | 中等    | 大约大30-50% | 好    | 软件H.264。较低CPU                                        |
+| 硬件编码器           | 非常低  | 最大        | 好    | 卸载到专用硬件。适用于CPU受限的系统 |
+
+### 可用的硬件编码器
+
+| 编码器             | 平台      | 硬件                                                                                         | CLI值                            |
+| ------------------- | ------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------ |
+| `h264_videotoolbox` | macOS         | Apple Silicon / Intel                                                                            | `--dataset.vcodec=h264_videotoolbox` |
+| `hevc_videotoolbox` | macOS         | Apple Silicon / Intel                                                                            | `--dataset.vcodec=hevc_videotoolbox` |
+| `h264_nvenc`        | Linux/Windows | NVIDIA GPU                                                                                       | `--dataset.vcodec=h264_nvenc`        |
+| `hevc_nvenc`        | Linux/Windows | NVIDIA GPU                                                                                       | `--dataset.vcodec=hevc_nvenc`        |
+| `h264_vaapi`        | Linux         | Intel/AMD GPU                                                                                    | `--dataset.vcodec=h264_vaapi`        |
+| `h264_qsv`          | Linux/Windows | Intel Quick Sync                                                                                 | `--dataset.vcodec=h264_qsv`          |
+| `auto`              | 任意           | 检测系统上可用的硬件编码器。如果未找到硬件编码器则回退到 `libsvtav1` | `--dataset.vcodec=auto`              |
+
+> [!NOTE]
+> 为了使用硬件加速编码器，您可能需要升级GPU驱动程序。
+
+> [!NOTE]
+> `libsvtav1`是默认选项，因为它提供最佳的训练性能；其他编解码器可以降低CPU使用率并更快，但它们通常会产生更大的文件，可能会影响训练时间。
+
+## 5. 故障排除
+
+| 症状                                                            | 可能原因                                 | 修复方法                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 系统冻结或机器人运动不流畅或Rerun可视化延迟 | CPU饥饿（100%负载使用）                | 关闭其他应用程序，降低编码吞吐量，降低`encoder_threads`，使用`h264`，使用`display_data=False`。如果CPU持续处于100%，可能不足以满足您的设置，考虑使用`--dataset.streaming_encoding=false`或硬件编码（`--dataset.vcodec=auto`） |
+| "Encoder queue full"警告或数据集中丢帧         | 编码器跟不上（队列溢出）       | 如果CPU未达到100%：增加`encoder_threads`，增加`encoder_queue_maxsize`或使用硬件编码（`--dataset.vcodec=auto`）。                                                                                                                                                    |
+| 高RAM使用率                                                     | 编码速度跟不上队列填充速度           | `encoder_threads`太低或CPU不足。减少`encoder_queue_maxsize`或使用硬件编码                                                                                                                                                                                     |
+| 视频文件很大                                                  | 使用硬件编码器或H.264                    | 预期的权衡。如果CPU允许，切换到`libsvtav1`                                                                                                                                                                                                                              |
+| `save_episode()`仍然很慢                                        | `streaming_encoding`为`False`              | 设置`--dataset.streaming_encoding=true`                                                                                                                                                                                                                                              |
+| 编码器线程崩溃                                               | 编解码器不可用或设置无效      | 检查`vcodec`已安装，尝试`--dataset.vcodec=auto`                                                                                                                                                                                                                             |
+| 记录的数据集缺少帧                                 | CPU/GPU饥饿或偶发性负载峰值 | 如果约5%的帧丢失，您的系统可能过载——请遵循上述建议。如果丢失的帧较少（约2%），可能是由于偶发性的瞬时负载峰值（通常在启动时）造成的，可以认为是预期的。                                   |
+
+## 6. 建议的配置
+
+这些估计值是保守的；我们建议在您的设置上进行测试——从低负载开始并逐渐增加。
+
+### 高端系统：现代12+核心（24+线程）
+
+大约250-500M px/秒的吞吐量在CPU上应该可以轻松处理。为了获得更好的结果，如果有可用的硬件编码器，请尝试使用硬件编码。
+
+```bash
+# 3个摄像头 1280x720x3 @30fps：默认值效果良好。可选增加编码器并行度。
+# 2个摄像头 1920x1080x3 @30fps：默认值效果良好。可选增加编码器并行度。
+lerobot-record --dataset.encoder_threads=5 ...
+
+# 3个摄像头 1920x1080x3 @30fps：可能需要一些调优。
+```
+
+### 中端系统：现代8+核心（16+线程）或Apple Silicon
+
+大约80-300M px/秒的吞吐量在CPU上应该是可能的。
+
+```bash
+# 3个摄像头 640x480x3 @30fps：默认值效果良好。可选减少编码器并行度。
+# 2个摄像头 1280x720x3 @30fps：默认值效果良好。可选减少编码器并行度。
+lerobot-record --dataset.encoder_threads=2 ...
+
+# 2个摄像头 1920x1080x3 @30fps：可能需要一些调优。
+```
+
+### 低资源系统：现代4+核心（8+线程）或Raspberry Pi 5
+
+在非常受限的系统上，流式编码可能与捕获循环竞争过于激烈。禁用它会回退到基于PNG的方法，其中编码发生在episode之间（阻塞，但不会干扰捕获）。或者，以较低的吞吐量录制以减少捕获和编码负载。考虑也将编解码器改为`h264`并使用批量编码。
+
+```bash
+# 2个摄像头 640x480x3 @30fps：需要一些调优。
+
+# 使用H.264，禁用流式编码，考虑批量编码
+lerobot-record --dataset.vcodec=h264 --dataset.streaming_encoding=false ...
+```
+
+## 7. 结束语
+
+性能最终取决于您的具体设置——帧率、分辨率、CPU核心和负载、可用内存、episode长度，以及您选择的编解码器。始终使用您的工作负载进行测试，注意您的CPU和系统能力，并合理地调优`encoder_threads`、`encoder_queue_maxsize`和`vcodec`。也就是说，一个常见的实际配置（对于许多应用）是三个摄像头640×480x3 @30fps；这在现代系统上使用默认的流式视频编码设置通常运行良好。始终通过将视频持续时间与CLI episode持续时间进行比较并确认行数等于FPS × CLI持续时间来验证您记录的数据集是否健康。

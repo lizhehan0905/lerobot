@@ -274,3 +274,281 @@ ip link show can0
 - [OpenArm GitHub](https://github.com/enactic/openarm)
 - [Safety Guide](https://docs.openarm.dev/getting-started/safety-guide)
 - [Damiao Motors and CAN Bus](./damiao)
+
+---
+
+# OpenArm 中文文档
+
+[OpenArm](https://openarm.dev)是一款开源的7自由度拟人臂，专为物理AI研究和部署而设计。
+
+要获取您的OpenArm（无论是组装好的还是DIY套件），并加入全球社区，请在 [openarm.dev](https://openarm.dev) 浏览全球经过验证和认证的制造商。
+
+## 独特之处
+
+- **人体尺度设计**：OpenArm采用人体比例设计，按160-165cm身高的人进行缩放。这在实际可达范围和可管理惯性之间提供了最佳平衡，实现安全、响应灵敏的操作。
+
+- **安全至上架构**：采用QDD背驱电机和高顺从性构建，OpenArm在保持实际有效载荷能力（峰值6.0kg / 标称4.1kg）用于现实世界任务的同时，优先考虑安全的人机交互。
+
+- **经久耐用**：关键结构部件采用铝和不锈钢制造，确保在重复数据采集和持续研究使用中表现出稳健性能。
+
+- **完全可访问和可构建**：每个部件，从CNC加工零件和3D打印外壳到电气布线，都设计为研究人员和实验室可以直接购买和组装，并提供完整的制造数据。
+
+- **实用且经济**：完整双手系统售价6,500美元，OpenArm以传统类人机器人成本的一小部分提供研究级性能。
+
+## 平台要求
+
+<Tip warning={true}>
+  **仅限Linux**：OpenArm目前仅支持Linux。CAN总线USB适配器没有macOS驱动程序，尚未在Windows上测试。
+</Tip>
+
+## 安全指南
+
+在操作OpenArm之前，请阅读[官方安全指南](https://docs.openarm.dev/getting-started/safety-guide)。要点如下：
+
+- **安全安装**：用螺丝或夹具将机械臂牢固地固定在平坦、稳定的表面上
+- **安全距离**：在操作期间，保持身体部位和物体在运动范围之外
+- **防护设备**：始终佩戴护目镜；根据需要使用其他个人防护装备
+- **有效载荷限制**：不要超过指定的有效载荷限制（每臂峰值6.0kg / 标称4.1kg）
+- **紧急停止**：了解紧急停止装置的位置和操作方法
+- **定期检查**：检查螺丝是否松动、机械限位是否损坏、异常噪音和布线损坏
+
+## 硬件设置
+
+请按照官方[OpenArm硬件文档](https://docs.openarm.dev)进行操作：
+
+- 物料清单和采购
+- 3D打印说明
+- 机械组装
+- 电气布线
+
+硬件仓库可在 [github.com/enactic/openarm](https://github.com/enactic/openarm) 获取。
+
+## CAN总线设置
+
+OpenArm使用CAN总线与Damiao电机通信。获取CAN总线USB适配器并插入Linux PC后，请按照[Damiao电机和CAN总线指南](./damiao)配置接口。
+
+快速设置：
+
+```bash
+# Setup CAN interfaces
+lerobot-setup-can --mode=setup --interfaces=can0,can1
+
+# Test motor communication
+lerobot-setup-can --mode=test --interfaces=can0,can1
+```
+
+## 安装LeRobot 🤗
+
+请遵循我们的[安装指南](./installation)，然后安装Damiao电机支持：
+
+```bash
+pip install -e ".[damiao]"
+```
+
+## 使用方法
+
+### 从动臂（机器人）
+
+<hfoptions id="follower">
+<hfoption id="Command">
+
+```bash
+lerobot-calibrate \
+    --robot.type=openarm_follower \
+    --robot.port=can0 \
+    --robot.side=right \
+    --robot.id=my_openarm_follower
+```
+
+</hfoption>
+<hfoption id="API example">
+
+```python
+from lerobot.robots.openarm_follower import OpenArmFollower, OpenArmFollowerConfig
+
+config = OpenArmFollowerConfig(
+    port="can0",
+    side="right",  # or "left" for left arm
+    id="my_openarm_follower",
+)
+
+follower = OpenArmFollower(config)
+follower.connect()
+
+# Read current state
+obs = follower.get_observation()
+print(obs)
+
+# Send action (position in degrees)
+action = {
+    "joint_1.pos": 0.0,
+    "joint_2.pos": 0.0,
+    "joint_3.pos": 0.0,
+    "joint_4.pos": 45.0,
+    "joint_5.pos": 0.0,
+    "joint_6.pos": 0.0,
+    "joint_7.pos": 0.0,
+    "gripper.pos": 0.0,
+}
+follower.send_action(action)
+
+follower.disconnect()
+```
+
+</hfoption>
+</hfoptions>
+
+### 主动臂（遥操作器）
+
+主动臂用于遥操作——手动移动它来控制从动臂。
+
+<hfoptions id="leader">
+<hfoption id="Command">
+
+```bash
+lerobot-calibrate \
+    --teleop.type=openarm_leader \
+    --teleop.port=can1 \
+    --teleop.id=my_openarm_leader
+```
+
+</hfoption>
+<hfoption id="API example">
+
+```python
+from lerobot.teleoperators.openarm_leader import OpenArmLeader, OpenArmLeaderConfig
+
+config = OpenArmLeaderConfig(
+    port="can1",
+    id="my_openarm_leader",
+    manual_control=True,  # Disable torque for manual movement
+)
+
+leader = OpenArmLeader(config)
+leader.connect()
+
+# Read current position (as action to send to follower)
+action = leader.get_action()
+print(action)
+
+leader.disconnect()
+```
+
+</hfoption>
+</hfoptions>
+
+### 遥操作
+
+要使用主从控制对OpenArm进行遥操作：
+
+```bash
+lerobot-teleoperate \
+    --robot.type=openarm_follower \
+    --robot.port=can0 \
+    --robot.side=right \
+    --robot.id=my_follower \
+    --teleop.type=openarm_leader \
+    --teleop.port=can1 \
+    --teleop.id=my_leader
+```
+
+### 双手遥操作
+
+要遥操作双手OpenArm设置（两个主动臂和两个从动臂）：
+
+```bash
+lerobot-teleoperate \
+    --robot.type=bi_openarm_follower \
+    --robot.left_arm_config.port=can0 \
+    --robot.left_arm_config.side=left \
+    --robot.right_arm_config.port=can1 \
+    --robot.right_arm_config.side=right \
+    --robot.id=my_bimanual_follower \
+    --teleop.type=bi_openarm_leader \
+    --teleop.left_arm_config.port=can2 \
+    --teleop.right_arm_config.port=can3 \
+    --teleop.id=my_bimanual_leader
+```
+
+### 录制数据
+
+要在遥操作期间录制数据集：
+
+```bash
+lerobot-record \
+    --robot.type=openarm_follower \
+    --robot.port=can0 \
+    --robot.side=right \
+    --robot.id=my_follower \
+    --teleop.type=openarm_leader \
+    --teleop.port=can1 \
+    --teleop.id=my_leader \
+    --repo-id=my_hf_username/my_openarm_dataset \
+    --fps=30 \
+    --num-episodes=10
+```
+
+## 配置选项
+
+### 从动臂配置
+
+| 参数                  | 默认值     | 描述                                                    |
+| --------------------- | --------- | ---------------------------------------------------------- |
+| `port`                | -         | CAN接口（例如 `can0`）                               |
+| `side`                | `None`    | 手臂侧：`"left"`、`"right"`或`None`用于自定义限位 |
+| `use_can_fd`          | `True`    | 启用CAN FD以获得更高数据速率                        |
+| `can_bitrate`         | `1000000` | 标称比特率（1 Mbps）                                   |
+| `can_data_bitrate`    | `5000000` | CAN FD数据比特率（5 Mbps）                               |
+| `max_relative_target` | `None`    | 相对目标位置的安全限制                 |
+| `position_kp`         | 每关节    | 位置控制比例增益                        |
+| `position_kd`         | 每关节    | 位置控制微分增益                          |
+
+### 主动臂配置
+
+| 参数               | 默认值     | 描述                              |
+| ------------------ | --------- | ----------------------------------- |
+| `port`             | -         | CAN接口（例如 `can1`）        |
+| `manual_control`   | `True`    | 禁用扭矩以进行手动移动  |
+| `use_can_fd`       | `True`    | 启用CAN FD以获得更高数据速率 |
+| `can_bitrate`      | `1000000` | 标称比特率（1 Mbps）            |
+| `can_data_bitrate` | `5000000` | CAN FD数据比特率（5 Mbps）        |
+
+## 电机配置
+
+OpenArm使用Damiao电机，具有以下默认配置：
+
+| 关节                       | 电机型号 | 发送ID | 接收ID |
+| --------------------------- | ---------- | ------- | ------- |
+| joint_1（肩部旋转）      | DM8009     | 0x01    | 0x11    |
+| joint_2（肩部抬起）     | DM8009     | 0x02    | 0x12    |
+| joint_3（肩部旋转） | DM4340     | 0x03    | 0x13    |
+| joint_4（肘部弯曲）        | DM4340     | 0x04    | 0x14    |
+| joint_5（腕部滚转）        | DM4310     | 0x05    | 0x15    |
+| joint_6（腕部俯仰）       | DM4310     | 0x06    | 0x16    |
+| joint_7（腕部旋转）    | DM4310     | 0x07    | 0x17    |
+| gripper                     | DM4310     | 0x08    | 0x18    |
+
+## 故障排除
+
+### 电机无响应
+
+1. 检查电源连接
+2. 验证CAN布线（CAN-H、CAN-L、GND）
+3. 运行诊断：`lerobot-setup-can --mode=test --interfaces=can0`
+4. 详见[Damiao故障排除指南](./damiao#troubleshooting)
+
+### 找不到CAN接口
+
+确保CAN接口已配置：
+
+```bash
+ip link show can0
+```
+
+## 资源
+
+- [OpenArm网站](https://openarm.dev)
+- [OpenArm文档](https://docs.openarm.dev)
+- [OpenArm GitHub](https://github.com/enactic/openarm)
+- [安全指南](https://docs.openarm.dev/getting-started/safety-guide)
+- [Damiao电机和CAN总线](./damiao)

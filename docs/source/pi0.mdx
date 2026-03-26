@@ -94,3 +94,102 @@ lerobot-train \
 ## License
 
 This model follows the **Apache 2.0 License**, consistent with the original [OpenPI repository](https://github.com/Physical-Intelligence/openpi).
+
+---
+
+# π₀ (Pi0) 中文文档
+
+π₀ 是一个来自 Physical Intelligence 的**通用机器人控制视觉语言动作模型**。LeRobot 实现改编自其开源的 [OpenPI](https://github.com/Physical-Intelligence/openpi) 仓库。
+
+## 模型概述
+
+π₀ 代表了机器人领域的突破——它是 [Physical Intelligence](https://www.physicalintelligence.company/blog/pi0) 开发的首个通用机器人基础模型。与传统为重复运动而设计的狭窄专业机器人程序不同，π₀ 被设计为一个通用策略，能够理解视觉输入、解释自然语言指令，并控制多种不同机器人完成多样化任务。
+
+<img
+  src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/lerobot-pi0%20(1).png"
+  alt="Pi0 概览"
+  width="85%"
+/>
+
+### Physical Intelligence 的愿景
+
+正如 Physical Intelligence 所描述的，尽管人工智能在数字领域取得了显著成就，从棋类游戏到药物发现，但人类智能在物理世界中仍然远超人工智能。用莫拉维克悖论来说，下棋对人工智能来说是"简单"的问题，但叠衣服或清理桌子需要解决一些有史以来最困难的工程问题。π₀ 是开发人工物理智能的第一步，它使用户能够像使用大型语言模型一样简单地要求机器人执行任何他们想要的任务。
+
+### 架构与方法
+
+π₀ 结合了几个关键创新：
+
+- **流匹配（Flow Matching）**：使用一种新方法，通过流匹配（扩散模型的变体）为预训练的 VLM 增强连续动作输出
+- **跨本体训练（Cross-Embodiment Training）**：在来自 8 个不同机器人平台的数据上进行训练，包括 UR5e、双臂 UR5e、Franka、双臂 Trossen、双臂 ARX、Mobile Trossen 和 Mobile Fibocom
+- **互联网规模预训练（Internet-Scale Pre-training）**：继承自预训练的 30 亿参数视觉语言模型的语义知识
+- **高频控制（High-Frequency Control）**：以高达 50 Hz 的频率输出电机命令，实现实时灵巧操作
+
+## 安装要求
+
+1. 按照我们的[安装指南](./installation)安装 LeRobot
+2. 通过运行以下命令安装 Pi0 依赖项：
+
+   ```bash
+   pip install -e ".[pi]"
+   ```
+
+## 训练数据与能力
+
+π₀ 使用迄今为止最大的机器人交互数据集进行训练，整合了三个关键数据源：
+
+1. **互联网规模预训练**：来自网络的视觉语言数据，用于语义理解
+2. **Open X-Embodiment 数据集**：开源机器人操作数据集
+3. **Physical Intelligence 数据集**：涵盖 8 个不同机器人的大规模且多样化的灵巧任务数据集
+
+## 使用方法
+
+要在 LeRobot 中使用 π₀，请指定策略类型为：
+
+```python
+policy.type=pi0
+```
+
+## 训练
+
+对于训练 π₀，您可以使用标准 LeRobot 训练脚本并配置适当的参数：
+
+```bash
+lerobot-train \
+    --dataset.repo_id=your_dataset \
+    --policy.type=pi0 \
+    --output_dir=./outputs/pi0_training \
+    --job_name=pi0_training \
+    --policy.pretrained_path=lerobot/pi0_base \
+    --policy.repo_id=your_repo_id \
+    --policy.compile_model=true \
+    --policy.gradient_checkpointing=true \
+    --policy.dtype=bfloat16 \
+    --policy.freeze_vision_encoder=false \
+    --policy.train_expert_only=false \
+    --steps=3000 \
+    --policy.device=cuda \
+    --batch_size=32
+```
+
+### 关键训练参数
+
+- **`--policy.compile_model=true`**：启用模型编译以加速训练
+- **`--policy.gradient_checkpointing=true`**：在训练期间显著减少内存使用
+- **`--policy.dtype=bfloat16`**：使用混合精度训练以提高效率
+- **`--batch_size=32`**：训练批次大小，根据您的 GPU 内存进行调整
+- **`--policy.pretrained_path=lerobot/pi0_base`**：您想要微调的基础 π₀ 模型，可选参数包括：
+  - [lerobot/pi0_base](https://huggingface.co/lerobot/pi0_base)
+  - [lerobot/pi0_libero](https://huggingface.co/lerobot/pi0_libero)（专门在 Libero 数据集上训练）
+
+### 训练参数说明
+
+| 参数                    | 默认值   | 描述                                       |
+| ----------------------- | -------- | ------------------------------------------ |
+| `freeze_vision_encoder` | `false`  | 不冻结视觉编码器                           |
+| `train_expert_only`     | `false`  | 不冻结 VLM，训练所有参数                   |
+
+**💡 提示**：设置 `train_expert_only=true` 会冻结 VLM，仅训练动作专家和投影层，从而允许以更少的内存进行微调。
+
+## 许可证
+
+该模型遵循 **Apache 2.0 许可证**，与原始 [OpenPI 仓库](https://github.com/Physical-Intelligence/openpi) 一致。

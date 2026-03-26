@@ -60,3 +60,53 @@ to the `--peft.full_training_modules` parameter:
 
 The learning rate and the scheduled target learning rate can usually be scaled by a factor of 10 compared to the
 learning rate used for full fine-tuning (e.g., 1e-4 normal, so 1e-3 using LoRA).
+
+---
+
+# 使用🤗 PEFT进行参数高效微调
+
+[🤗 PEFT](https://github.com/huggingface/peft)（参数高效微调）是一个用于高效适应大型预训练模型（例如预训练策略如SmolVLA、π₀等）到新任务的库，无需训练模型的所有参数，同时能够获得相当不错的性能。
+
+安装 `lerobot[peft]` 可选包以启用PEFT支持。
+
+要了解所有可能的适配方法，请参阅[🤗 PEFT文档](https://huggingface.co/docs/peft/index)。
+
+## 训练SmolVLA
+
+本节将向您展示如何在libero数据集上使用PEFT训练预训练的SmolVLA策略。为简洁起见，我们仅在 `libero_spatial` 子集上进行训练。我们将使用 `lerobot/smolvla_base` 作为模型进行参数高效微调：
+
+```
+lerobot-train \
+ --policy.path=lerobot/smolvla_base \
+ --policy.repo_id=your_hub_name/my_libero_smolvla \
+ --dataset.repo_id=HuggingFaceVLA/libero \
+ --policy.output_features=null \
+ --policy.input_features=null \
+ --policy.optimizer_lr=1e-3 \
+ --policy.scheduler_decay_lr=1e-4 \
+ --env.type=libero \
+ --env.task=libero_spatial \
+ --steps=100000 \
+ --batch_size=32 \
+ --peft.method_type=LORA \
+ --peft.r=64
+```
+
+请注意 `--peft.method_type` 参数，它允许您选择使用哪种PEFT方法。这里我们使用
+[LoRA](https://huggingface.co/docs/peft/main/en/package_reference/lora)（低秩适配器），这可能是迄今为止最流行的微调方法。低秩适配意味着我们只微调一个秩相对较低的矩阵，而不是完整的权重矩阵。这个秩可以通过 `--peft.r` 参数指定。秩越高，越接近完全微调的效果。
+
+还有一些更复杂的方法拥有更多参数。这些尚未支持，如果您希望看到支持特定的PEFT方法，欢迎提交issue。
+
+默认情况下，PEFT将针对SmolVLA中LM expert的 `q_proj` 和 `v_proj` 层。它还会针对状态和动作投影矩阵，因为它们最可能是任务相关的。如果您需要针对不同的层，可以使用 `--peft.target_modules` 指定要针对的层。您可以参考相应PEFT方法的文档查看支持哪些输入（例如，[LoRA的target_modules文档](https://huggingface.co/docs/peft/main/en/package_reference/lora#peft.LoraConfig.target_modules)）。通常支持后缀列表或正则表达式。例如，要针对 `lm_expert` 的MLP而不是 `q` 和 `v` 投影，请使用：
+
+```
+--peft.target_modules='(model\.vlm_with_expert\.lm_expert\..*\.(down|gate|up)_proj|.*\.(state_proj|action_in_proj|action_out_proj|action_time_mlp_in|action_time_mlp_out))'
+```
+
+如果您需要完全微调某一层而不是仅对其进行适配，可以将层后缀列表提供给 `--peft.full_training_modules` 参数：
+
+```
+--peft.full_training_modules=["state_proj"]
+```
+
+与完全微调所使用的学习率相比，学习率和调度目标学习率通常可以放大10倍（例如，正常使用1e-4，所以使用LoRA时使用1e-3）。

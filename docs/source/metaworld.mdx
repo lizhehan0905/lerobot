@@ -78,3 +78,86 @@ This will run episodes and return per-task success rates using the standard Meta
 - If you care about generalization, run on the full MT50 suite — it’s intentionally challenging and reveals strengths/weaknesses better than a few narrow tasks.
 - Use the one-hot task conditioning for multi-task training (MT10 / MT50 conventions) so policies have explicit task context.
 - Inspect the dataset task descriptions and the `info["is_success"]` keys when writing post-processing or logging so your success metrics line up with the benchmark.
+
+---
+
+# Meta-World
+
+Meta-World 是一个精心设计的开源模拟基准，专门用于多任务学习和元强化学习在连续控制机器人操作领域的研究。它为研究人员提供了一个共享的、真实的平台，用于测试算法是否能 _学习多种不同任务_ 并 _快速泛化到新任务_ —— 这是现实机器人领域的两个核心挑战。
+
+- 📄 [Meta-World 论文](https://arxiv.org/pdf/1910.10897)
+- 💻 [原始 Meta-World 仓库](https://github.com/Farama-Foundation/Metaworld)
+
+![MetaWorld MT10 demo](https://meta-world.github.io/figures/ml45.gif)
+
+## 为什么 Meta-World 很重要
+
+- **多样化的真实任务。** Meta-World 打包了大量模拟操作任务（MT50 套件中有 50 个），使用日常物品和一个通用的桌面式 Sawyer 机械臂。这种多样性使算法能够接触各种动力学、接触和目标规范，同时保持一致的控制和观察结构。
+- **专注于泛化和多任务学习。** 通过在共享结构但目标和物体不同的任务分布上进行评估，Meta-World 可以揭示智能体是否真正学习了可迁移的技能，而不是过拟合到狭窄的任务中。
+- **标准化的评估协议。** 它提供了清晰的评估模式和难度划分，因此不同方法可以在简单、中等、困难和极难的各种设置下进行公平比较。
+- **实证洞察。** 过去在 Meta-World 上的评估显示在某些方面取得了令人瞩目的进展，但也表明当前的多任务和元强化学习方法在处理大型、多样化的任务集时仍然存在困难。这个差距指明了重要的研究方向。
+
+## 它在 LeRobot 中的应用
+
+在 LeRobot 中，你可以评估任何策略或视觉语言动作（VLA）模型在 Meta-World 任务上的表现，并获得清晰的成功率度量。集成设计非常简单：
+
+- 我们在 Hugging Face Hub 上提供了一个 LeRobot 格式的 Meta-World（MT50）数据集：`https://huggingface.co/datasets/lerobot/metaworld_mt50`。
+  - 该数据集格式用于 MT50 评估，使用所有 50 个任务（最具挑战性的多任务设置）。
+  - MT50 为策略提供独热任务向量，并使用固定的物体/目标位置以确保一致性。
+
+- 任务描述和评估所需的具体键在仓库/数据集中提供 —— 使用这些来确保你的策略输出正确的成功信号。
+
+## 快速开始，在 Meta-World 上训练 SmolVLA 策略
+
+在部分任务上训练 SmolVLA 策略的示例命令：
+
+```bash
+lerobot-train \
+  --policy.type=smolvla \
+  --policy.repo_id=${HF_USER}/metaworld-test \
+  --policy.load_vlm_weights=true \
+  --dataset.repo_id=lerobot/metaworld_mt50 \
+  --env.type=metaworld \
+  --env.task=assembly-v3,dial-turn-v3,handle-press-side-v3 \
+  --output_dir=./outputs/ \
+  --steps=100000 \
+  --batch_size=4 \
+  --eval.batch_size=1 \
+  --eval.n_episodes=1 \
+  --eval_freq=1000
+```
+
+注意：
+
+- `--env.task` 接受显式的任务列表（逗号分隔）或难度组（例如 `env.task="hard"`）。
+- 调整 `batch_size`、`steps` 和 `eval_freq` 以匹配你的计算预算。
+- **Gymnasium 断言错误**：如果在运行 MetaWorld 环境时遇到类似
+  `AssertionError: ['human', 'rgb_array', 'depth_array']` 的错误，这是因为 MetaWorld 和你的 Gymnasium 版本不匹配。
+  我们建议使用：
+
+```bash
+  pip install "gymnasium==1.1.0"
+```
+
+以确保兼容性。
+
+## 快速开始 —— 评估训练好的策略
+
+在 Meta-World 中等难度划分上评估训练好的策略：
+
+```bash
+lerobot-eval \
+  --policy.path="your-policy-id" \
+  --env.type=metaworld \
+  --env.task=medium \
+  --eval.batch_size=1 \
+  --eval.n_episodes=2
+```
+
+这将运行 episode 并使用标准 Meta-World 评估键返回每个任务的成功率。
+
+## 实用建议
+
+- 如果你关心泛化，请在完整的 MT50 套件上运行 —— 它故意具有挑战性，比少数狭窄任务更能揭示优势/劣势。
+- 使用独热任务条件进行多任务训练（MT10 / MT50 约定），以便策略具有明确的任务上下文。
+- 在编写后处理或日志记录时，检查数据集任务描述和 `info["is_success"]` 键，使你的成功指标与基准保持一致。

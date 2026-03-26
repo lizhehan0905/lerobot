@@ -132,3 +132,142 @@ lerobot-record \
 ## License
 
 This model follows the **Apache 2.0 License**, consistent with the original [GR00T repository](https://github.com/NVIDIA/Isaac-GR00T).
+
+---
+
+# 中文翻译
+
+# GR00T N1.5 策略
+
+GR00T N1.5 是 NVIDIA 设计的开源基础模型，用于通用人形机器人推理和技能。它是一个跨本体模型，接受多模态输入，包括语言和图像，以在多样化的环境中执行操作任务。
+
+本文档概述了其与 LeRobot 框架的集成和使用细节。
+
+## 模型概述
+
+NVIDIA Isaac GR00T N1.5 是 GR00T N1 基础模型的升级版本。它旨在为人形机器人改进泛化和语言跟随能力。
+
+开发人员和研究人员可以使用自己的真实或合成数据对 GR00T N1.5 进行后训练，以适配特定的人形机器人或任务。
+
+GR00T N1.5（特别是 GR00T-N1.5-3B 模型）使用预训练的视觉和语言编码器构建。它利用流匹配动作转换器来建模动作块，以视觉、语言和本体感觉为条件。
+
+<img
+  src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/lerobot/lerobot-groot-paper1%20(1).png"
+  alt="GR00T 概述"
+  width="80%"
+/>
+
+其强大性能来自于在广泛且多样化的人形数据集上训练，包括：
+
+- 来自机器人的真实捕获数据。
+- 使用 NVIDIA Isaac GR00T Blueprint 生成的综合数据。
+- 互联网规模的视频数据。
+
+这种方法允许模型通过后训练高度适应特定的本体、任务和环境。
+
+## 安装要求
+
+截至今天，GR00T N1.5 需要 flash attention 才能正常工作。
+
+我们正在努力使其成为可选的，但与此同时这意味着我们需要一个额外的安装步骤，并且它只能用于启用 CUDA 的设备。
+
+1. 按照我们的[安装指南](./installation)进行环境设置。**注意**在此步骤中不要安装 `lerobot`。
+2. 通过运行以下命令安装 [Flash Attention](https://github.com/Dao-AILab/flash-attention)：
+
+```bash
+# 检查 https://pytorch.org/get-started/locally/ 了解您的系统
+pip install "torch>=2.2.1,<2.8.0" "torchvision>=0.21.0,<0.23.0" # --index-url https://download.pytorch.org/whl/cu1XX
+pip install ninja "packaging>=24.2,<26.0" # flash attention 依赖项
+pip install "flash-attn>=2.5.9,<3.0.0" --no-build-isolation
+python -c "import flash_attn; print(f'Flash Attention {flash_attn.__version__} imported successfully')"
+```
+
+3. 通过运行以下命令安装 LeRobot：
+
+```bash
+pip install lerobot[groot]
+```
+
+## 使用方法
+
+要在您的 LeRobot 配置中使用 GR00T，请将策略类型指定为：
+
+```python
+policy.type=groot
+```
+
+## 训练
+
+### 训练命令示例
+
+以下是在您自己的数据集上微调基础 GR00T 模型的完整训练命令：
+
+```bash
+# 使用多 GPU 设置
+accelerate launch \
+  --multi_gpu \
+  --num_processes=$NUM_GPUS \
+  $(which lerobot-train) \
+  --output_dir=$OUTPUT_DIR \
+  --save_checkpoint=true \
+  --batch_size=$BATCH_SIZE \
+  --steps=$NUM_STEPS \
+  --save_freq=$SAVE_FREQ \
+  --log_freq=$LOG_FREQ \
+  --policy.push_to_hub=true \
+  --policy.type=groot \
+  --policy.repo_id=$REPO_ID \
+  --policy.tune_diffusion_model=false \
+  --dataset.repo_id=$DATASET_ID \
+  --wandb.enable=true \
+  --wandb.disable_artifact=true \
+  --job_name=$JOB_NAME
+```
+
+## 性能结果
+
+### Libero 基准测试结果
+
+> [!NOTE]
+> 按照我们的说明使用 Libero：[Libero](./libero)
+
+GR00T 在 Libero 基准测试套件上展示了强大的性能。为了比较和测试其 LeRobot 实现，我们在 Libero 数据集上对 GR00T N1.5 模型进行了 30k 步的微调，并将结果与 GR00T 参考结果进行了比较。
+
+| 基准测试          | LeRobot 实现 | GR00T 参考 |
+| ------------------ | ---------------------- | --------------- |
+| **Libero 空间** | 82.0%                  | 92.0%           |
+| **Libero 物体**  | 99.0%                  | 92.0%           |
+| **Libero 长期**    | 82.0%                  | 76.0%           |
+| **平均**        | 87.0%                  | 87.0%           |
+
+这些结果展示了 GR00T 在不同机器人操作任务中的强大泛化能力。要重现这些结果，您可以按照 [Libero](https://huggingface.co/docs/lerobot/libero) 部分中的说明进行操作。
+
+### 在您的硬件设置中评估
+
+使用您的参数训练模型后，您可以在下游任务中运行推理。按照[机器人模仿学习](./il_robots)中的说明进行操作。例如：
+
+```bash
+lerobot-record \
+  --robot.type=bi_so_follower \
+  --robot.left_arm_port=/dev/ttyACM1 \
+  --robot.right_arm_port=/dev/ttyACM0 \
+  --robot.id=bimanual_follower \
+  --robot.cameras='{ right: {"type": "opencv", "index_or_path": 0, "width": 640, "height": 480, "fps": 30},
+    left: {"type": "opencv", "index_or_path": 2, "width": 640, "height": 480, "fps": 30},
+    top: {"type": "opencv", "index_or_path": 4, "width": 640, "height": 480, "fps": 30},
+  }' \
+  --display_data=true \
+  --dataset.repo_id=<user>/eval_groot-bimanual  \
+  --dataset.num_episodes=10 \
+  --dataset.single_task="Grab and handover the red cube to the other arm" \
+  --dataset.streaming_encoding=true \
+  --dataset.encoder_threads=2 \
+  # --dataset.vcodec=auto \
+  --policy.path=<user>/groot-bimanual \ # 您的训练模型
+  --dataset.episode_time_s=30 \
+  --dataset.reset_time_s=10
+```
+
+## 许可证
+
+此模型遵循 **Apache 2.0 许可证**，与原始 [GR00T 仓库](https://github.com/NVIDIA/Isaac-GR00T) 一致。
