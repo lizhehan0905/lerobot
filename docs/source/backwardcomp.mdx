@@ -149,3 +149,159 @@ action_values = predict_action(
 ```
 
 If you have questions or run into migration issues, feel free to ask them on [Discord](https://discord.gg/s3KuuzsPFb)
+
+---
+
+# 中文翻译
+
+# 向后兼容性
+
+## 策略归一化迁移（PR #1452）
+
+**破坏性变更**：LeRobot 策略不再在其权重中嵌入内置归一化层。归一化现在由外部 `PolicyProcessorPipeline` 组件处理。
+
+### 变更内容？
+
+|                            | PR #1452 之前                                  | PR #1452 之后                                               |
+| -------------------------- | ------------------------------------------------ | ------------------------------------------------------------ |
+| **归一化位置** | 嵌入在模型权重中（`normalize_inputs.*`） | 外部 `PolicyProcessorPipeline` 组件                |
+| **模型状态字典**       | 包含归一化统计信息                | **仅干净权重** - 无归一化参数         |
+| **使用方式**                  | `policy(batch)` 处理所有内容               | `preprocessor(batch)` → `policy(...)` → `postprocessor(...)` |
+
+### 对现有模型的影响
+
+- 在 PR #1452 **之前**训练的模型在其权重中嵌入了归一化
+- 这些模型需要迁移才能与新的 `PolicyProcessorPipeline` 系统一起工作
+- 迁移提取归一化统计信息并创建单独的处理器管道
+
+### 迁移旧模型
+
+使用迁移脚本转换带有嵌入归一化的模型：
+
+```shell
+python src/lerobot/processor/migrate_policy_normalization.py \
+    --pretrained-path lerobot/act_aloha_sim_transfer_cube_human \
+    --push-to-hub \
+    --branch migrated
+```
+
+该脚本：
+
+1. **提取**模型权重中的归一化统计信息
+2. **创建**外部预处理器和后处理器管道
+3. **移除**模型权重中的归一化层
+4. **保存**干净的模型 + 处理器管道
+5. **推送到** Hub 并自动创建 PR
+
+### 使用迁移后的模型
+
+```python
+# 新的使用模式（迁移后）
+from lerobot.policies.factory import make_policy, make_pre_post_processors
+
+# 分别加载模型和处理器
+policy = make_policy(config, ds_meta=dataset.meta)
+preprocessor, postprocessor = make_pre_post_processors(
+    policy_cfg=config,
+    dataset_stats=dataset.meta.stats
+)
+
+# 通过管道处理数据
+processed_batch = preprocessor(raw_batch)
+action = policy.select_action(processed_batch)
+final_action = postprocessor(action)
+```
+
+## 硬件 API 重新设计
+
+PR [#777](https://github.com/huggingface/lerobot/pull/777) 改进了 LeRobot 校准，但**不向后兼容**。以下是变更内容以及如何继续使用在此拉取请求之前创建的数据集的概述。
+
+### 变更内容？
+
+|                                   | PR #777 之前                                    | PR #777 之后                                                |
+| --------------------------------- | ------------------------------------------------ | ------------------------------------------------------------ |
+| **关节范围**                   | 度数 `-180...180°`                             | **归一化范围** 关节：`-100...100` 夹爪：`0...100` |
+| **零位置（SO100 / SO101）** | 手臂水平完全伸展                   | **在每个关节范围的中间**                    |
+| **边界处理**             | 软件保护以检测 ±180° 环绕 | 由于中点零位，不需要环绕逻辑            |
+
+---
+
+### 对现有数据集的影响
+
+- 在 PR #777 **之前**创建的记录轨迹如果直接加载将无法正确回放：
+  - 关节角度偏移且归一化不正确。
+- 任何在旧数据上直接微调或训练的模型都需要转换其输入和输出。
+
+### 使用以前校准系统创建的数据集
+
+我们提供了一个迁移示例脚本，用于回放使用以前校准记录的片段：`examples/backward_compatibility/replay.py`。
+下面我们将带您了解示例脚本中为使以前的校准数据集正常工作所做的修改。
+
+```diff
++   key = f"{name.removeprefix('main_')}.pos"
+    action[key] = action_array[i].item()
++   action["shoulder_lift.pos"] = -(action["shoulder_lift.pos"] - 90)
++   action["elbow_flex.pos"] -= 90
+```
+
+让我们分解一下。
+新代码库对位置观测使用 `.pos` 后缀，我们移除了 `main_` 前缀：
+
+<!-- prettier-ignore-start -->
+```python
+key = f"{name.removeprefix('main_')}.pos"
+```
+<!-- prettier-ignore-end -->
+
+对于 `"shoulder_lift"`（id = 2），0 位置更改了 -90 度，方向与旧校准/代码相比是反转的。
+
+<!-- prettier-ignore-start -->
+```python
+action["shoulder_lift.pos"] = -(action["shoulder_lift.pos"] - 90)
+```
+<!-- prettier-ignore-end -->
+
+对于 `"elbow_flex"`（id = 3），0 位置与旧校准/代码相比更改了 -90 度。
+
+<!-- prettier-ignore-start -->
+```python
+action["elbow_flex.pos"] -= 90
+```
+<!-- prettier-ignore-end -->
+
+要使用度数归一化，我们将 `--robot.use_degrees` 选项设置为 `true`。
+
+```diff
+python examples/backward_compatibility/replay.py \
+    --robot.type=so101_follower \
+    --robot.port=/dev/tty.usbmodem5A460814411 \
+    --robot.id=blue \
++   --robot.use_degrees=true \
+    --dataset.repo_id=my_dataset_id \
+    --dataset.episode=0
+```
+
+### 使用以前校准系统训练的策略
+
+策略输出与数据集相同格式的动作（`torch.Tensors`）。因此，应应用相同的转换。
+
+要找到这些转换，我们建议首先尝试使用上面的部分回放策略所训练数据集的一个片段。
+然后，在您的推理脚本中添加相同的转换（此处显示在 `record.py` 脚本中）：
+
+```diff
+action_values = predict_action(
+    observation_frame,
+    policy,
+    get_safe_torch_device(policy.config.device),
+    policy.config.use_amp,
+    task=single_task,
+    robot_type=robot.robot_type,
+    )
+    action = {key: action_values[i].item() for i, key in enumerate(robot.action_features)}
+
++   action["shoulder_lift.pos"] = -(action["shoulder_lift.pos"] - 90)
++   action["elbow_flex.pos"] -= 90
+    robot.send_action(action)
+```
+
+如果您有疑问或遇到迁移问题，请随时在 [Discord](https://discord.gg/s3KuuzsPFb) 上提问

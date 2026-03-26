@@ -173,3 +173,183 @@ Check out these example policy implementations:
 - [DiTFlow Policy](https://github.com/danielsanjosepro/lerobot_policy_ditflow) - Diffusion Transformer policy with flow-matching objective. Try it out in this example: [DiTFlow Example](https://github.com/danielsanjosepro/test_lerobot_policy_ditflow)
 
 Share your policy implementations with the community! 🤗
+
+---
+
+# 中文翻译
+
+# 自带策略
+
+本教程解释如何将您自己的自定义策略实现集成到 LeRobot 生态系统中，让您能够在使用自己算法的同时利用所有 LeRobot 工具进行训练、评估和部署。
+
+## 步骤 1：创建策略包
+
+您的自定义策略应组织为可安装的 Python 包，遵循 LeRobot 的插件约定。
+
+### 包结构
+
+创建一个以 `lerobot_policy_` 为前缀（重要！）后跟您的策略名称的包：
+
+```bash
+lerobot_policy_my_custom_policy/
+├── pyproject.toml
+└── src/
+    └── lerobot_policy_my_custom_policy/
+        ├── __init__.py
+        ├── configuration_my_custom_policy.py
+        ├── modeling_my_custom_policy.py
+        └── processor_my_custom_policy.py
+```
+
+### 包配置
+
+设置您的 `pyproject.toml`：
+
+```toml
+[project]
+name = "lerobot_policy_my_custom_policy"
+version = "0.1.0"
+dependencies = [
+    # 您的策略特定依赖
+]
+requires-python = ">= 3.12"
+
+[build-system]
+build-backend = # 您的构建后端
+requires = # 您的构建系统
+```
+
+## 步骤 2：定义策略配置
+
+创建一个继承自 `PreTrainedConfig` 的配置类并注册您的策略类型：
+
+```python
+# configuration_my_custom_policy.py
+from dataclasses import dataclass, field
+from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs.types import NormalizationMode
+
+@PreTrainedConfig.register_subclass("my_custom_policy")
+@dataclass
+class MyCustomPolicyConfig(PreTrainedConfig):
+    """MyCustomPolicy 的配置类。
+
+    参数：
+        n_obs_steps：用作输入的观测步数
+        horizon：动作预测范围
+        n_action_steps：要执行的动作步数
+        hidden_dim：策略网络的隐藏维度
+        # 在此处添加您的策略特定参数
+    """
+    # ...PreTrainedConfig 字段...
+    pass
+
+    def __post_init__(self):
+        super().__post_init__()
+        # 在此处添加任何验证逻辑
+
+    def validate_features(self) -> None:
+        """验证输入/输出特征兼容性。"""
+        # 为您的策略要求实现验证逻辑
+        pass
+```
+
+## 步骤 3：实现策略类
+
+通过继承 LeRobot 的基础 `PreTrainedPolicy` 类来创建您的策略实现：
+
+```python
+# modeling_my_custom_policy.py
+import torch
+import torch.nn as nn
+from typing import Any
+
+from lerobot.policies.pretrained import PreTrainedPolicy
+from .configuration_my_custom_policy import MyCustomPolicyConfig
+
+class MyCustomPolicy(PreTrainedPolicy):
+    config_class = MyCustomPolicyConfig
+    name = "my_custom_policy"
+
+    def __init__(self, config: MyCustomPolicyConfig, dataset_stats: dict[str, Any] = None):
+        super().__init__(config, dataset_stats)
+        ...
+```
+
+## 步骤 4：添加数据处理器
+
+创建处理器函数：
+
+```python
+# processor_my_custom_policy.py
+from typing import Any
+import torch
+
+
+def make_my_custom_policy_pre_post_processors(
+    config,
+) -> tuple[
+    PolicyProcessorPipeline[dict[str, Any], dict[str, Any]],
+    PolicyProcessorPipeline[PolicyAction, PolicyAction],
+]:
+    """为您的策略创建预处理和后处理函数。"""
+    pass  # 在此处定义您的预处理和后处理逻辑
+
+```
+
+## 步骤 5：包初始化
+
+在包的 `__init__.py` 中暴露您的类：
+
+```python
+# __init__.py
+"""LeRobot 的自定义策略包。"""
+
+try:
+    import lerobot  # noqa: F401
+except ImportError:
+    raise ImportError(
+        "lerobot 未安装。请安装 lerobot 以使用此策略包。"
+    )
+
+from .configuration_my_custom_policy import MyCustomPolicyConfig
+from .modeling_my_custom_policy import MyCustomPolicy
+from .processor_my_custom_policy import make_my_custom_policy_pre_post_processors
+
+__all__ = [
+    "MyCustomPolicyConfig",
+    "MyCustomPolicy",
+    "make_my_custom_policy_pre_post_processors",
+]
+```
+
+## 步骤 6：安装和使用
+
+### 安装您的策略包
+
+```bash
+cd lerobot_policy_my_custom_policy
+pip install -e .
+
+# 或者如果已发布到 PyPI
+pip install lerobot_policy_my_custom_policy
+```
+
+### 使用您的策略
+
+安装后，您的策略会自动与 LeRobot 的训练和评估工具集成：
+
+```bash
+lerobot-train \
+    --policy.type my_custom_policy \
+    --env.type pusht \
+    --steps 200000
+```
+
+## 示例和社区贡献
+
+查看这些示例策略实现：
+
+- [DiTFlow 策略](https://github.com/danielsanjosepro/lerobot_policy_ditflow) - 具有流匹配目标的扩散 Transformer 策略。在此示例中试用：[DiTFlow 示例](https://github.com/danielsanjosepro/test_lerobot_policy_ditflow)
+
+与社区分享您的策略实现！ 🤗

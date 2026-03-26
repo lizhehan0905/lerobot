@@ -181,3 +181,191 @@ wandb login
 ```
 
 You can now assemble your robot if it's not ready yet, look for your robot type on the left. Then follow the link below to use Lerobot with your robot.
+
+---
+
+# 中文翻译
+
+# 安装指南
+
+本指南使用 `conda`（通过 miniforge）管理环境（推荐）。如果您偏好其他环境管理器（如 `uv`、`venv`），请确保已安装 Python >=3.12 和带有 `libsvtav1` 编码器的 `ffmpeg`，然后跳转到[环境设置](#step-2-environment-setup)。
+
+## 步骤 1（仅限 `conda`）：安装 [`miniforge`](https://conda-forge.org/download/)
+
+```bash
+wget "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-$(uname)-$(uname -m).sh"
+bash Miniforge3-$(uname)-$(uname -m).sh
+```
+
+## 步骤 2：环境设置
+
+创建 Python 3.12 虚拟环境：
+
+<!-- prettier-ignore-start -->
+<hfoptions id="create_venv">
+<hfoption id="conda">
+```bash
+conda create -y -n lerobot python=3.12
+```
+</hfoption>
+<hfoption id="uv">
+```bash
+uv python install 3.12
+uv venv --python 3.12
+```
+</hfoption>
+</hfoptions>
+<!-- prettier-ignore-end -->
+
+然后激活您的虚拟环境，每次打开 shell 使用 lerobot 时都需要执行此操作：
+
+<!-- prettier-ignore-start -->
+<hfoptions id="activate_venv">
+<hfoption id="conda">```bash
+conda activate lerobot
+```</hfoption>
+<hfoption id="uv">
+```bash
+# Linux/macOS
+source .venv/bin/activate
+# Windows PowerShell
+source .venv\Scripts\Activate.ps1
+```
+</hfoption>
+</hfoptions>
+<!-- prettier-ignore-end -->
+
+使用 `conda` 时，在环境中安装 `ffmpeg`：
+
+```bash
+conda install ffmpeg -c conda-forge
+ffmpeg -version  # ffmpeg 8.X 尚未支持！
+```
+
+> [!TIP]
+> 这通常会为您的平台安装编译了 `libsvtav1` 编码器的 `ffmpeg 7.X`。如果 `libsvtav1` 不受支持（使用 `ffmpeg -encoders` 检查支持的编码器），您可以：
+>
+> - _[任何平台]_ 使用以下命令显式安装 `ffmpeg 7.X`：
+>
+> ```bash
+> conda install ffmpeg=7.1.1 -c conda-forge
+> ```
+>
+> - _[仅限 Linux]_ 如果您想使用自己的 ffmpeg：安装 [ffmpeg 构建依赖项](https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu#GettheDependencies)并[从源码编译带有 libsvtav1 的 ffmpeg](https://trac.ffmpeg.org/wiki/CompilationGuide/Ubuntu#libsvtav1)，并确保使用 `which ffmpeg` 来确认使用的是正确的 ffmpeg 二进制文件。
+
+> [!NOTE]
+> 在 WSL（Windows Subsystem for Linux）中安装 LeRobot 时，请确保使用以下命令安装 `evdev`：
+>
+> ```bash
+> conda install evdev -c conda-forge
+> ```
+
+> [!IMPORTANT]
+> 如果您使用 `uv`，则需要在系统范围内安装 `ffmpeg`（在虚拟环境之外）。您需要依赖 `uv` 和 `torchcodec` 动态链接到系统 `ffmpeg` 的能力。
+
+## 步骤 3：安装 LeRobot 🤗
+
+### 从源码安装
+
+首先，克隆仓库并进入目录：
+
+```bash
+git clone https://github.com/huggingface/lerobot.git
+cd lerobot
+```
+
+然后，以可编辑模式安装库。如果您计划为代码做出贡献，这很有用。
+
+<!-- prettier-ignore-start -->
+<hfoptions id="install_lerobot_src">
+<hfoption id="conda">
+```bash
+pip install -e .
+```
+</hfoption>
+<hfoption id="uv">
+```bash
+uv pip install -e .
+```
+</hfoption>
+</hfoptions>
+<!-- prettier-ignore-end -->
+
+### 从 PyPI 安装
+
+**核心库：**
+安装基础包：
+
+<!-- prettier-ignore-start -->
+<hfoptions id="install_lerobot_pypi">
+<hfoption id="conda">
+```bash
+pip install lerobot
+```
+</hfoption>
+<hfoption id="uv">
+```bash
+uv pip install lerobot
+```
+</hfoption>
+</hfoptions>
+<!-- prettier-ignore-end -->
+
+_这仅安装默认依赖项。_
+
+**额外功能：**
+要安装额外功能，请使用以下之一（如果使用 `uv`，请在下面的命令中将 `pip install` 替换为 `uv pip install`）：
+
+```bash
+pip install 'lerobot[all]'          # 所有可用功能
+pip install 'lerobot[aloha,pusht]'  # 特定功能（Aloha 和 Pusht）
+pip install 'lerobot[feetech]'      # Feetech 电机支持
+```
+
+_将 `[...]` 替换为您所需的功能。_
+
+**可用标签：**
+有关可选依赖项的完整列表，请参阅：
+https://pypi.org/project/lerobot/
+
+### 故障排除
+
+如果遇到构建错误，您可能需要安装额外的依赖项：`cmake`、`build-essential` 和 `ffmpeg libs`。
+要在 Linux 上安装这些依赖项，请运行：
+
+```bash
+sudo apt-get install cmake build-essential python3-dev pkg-config libavformat-dev libavcodec-dev libavdevice-dev libavutil-dev libswscale-dev libswresample-dev libavfilter-dev
+```
+
+对于其他系统，请参阅：[编译 PyAV](https://pyav.org/docs/develop/overview/installation.html#bring-your-own-ffmpeg)
+
+## 可选依赖项
+
+LeRobot 为特定功能提供可选扩展。可以组合多个扩展（例如 `.[aloha,feetech]`）。有关所有可用扩展，请参阅 `pyproject.toml`。如果使用 `uv`，请在下面的命令中将 `pip install` 替换为 `uv pip install`。
+
+### 模拟
+
+安装环境包：`aloha`（[gym-aloha](https://github.com/huggingface/gym-aloha)）或 `pusht`（[gym-pusht](https://github.com/huggingface/gym-pusht)）
+示例：
+
+```bash
+pip install -e ".[aloha]" # 或例如 "[pusht]"
+```
+
+### 电机控制
+
+对于 Koch v1.1，安装 Dynamixel SDK；对于 SO100/SO101/Moss，安装 Feetech SDK。
+
+```bash
+pip install -e ".[feetech]" # 或例如 "[dynamixel]"
+```
+
+### 实验跟踪
+
+要使用 [Weights and Biases](https://docs.wandb.ai/quickstart) 进行实验跟踪，请使用以下命令登录：
+
+```bash
+wandb login
+```
+
+如果您的机器人还没有组装好，现在可以组装了。在左侧查找您的机器人类型。然后按照下面的链接使用 Lerobot 与您的机器人。
