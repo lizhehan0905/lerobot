@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python  # Python解释器路径声明，指定使用Python解释器执行脚本
 
 # Copyright 2025 HuggingFace Inc. team. All rights reserved.
 #
@@ -34,117 +34,161 @@ lerobot-train \
 ```
 """
 
-import math
-from collections import deque
-from os import PathLike
-from typing import Any
 
+
+# 导入标准库
+import math
+from collections import deque  # 双端队列，用于管理动作序列缓存
+from os import PathLike  # 路径类型提示
+from typing import Any  # 任意类型注解
+
+# 导入第三方科学计算和深度学习库
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# 导入参数高效微调（LoRA）相关模块
 from peft import LoraConfig, get_peft_model
+
+# 导入图像处理库
 from PIL import Image
+
+# 导入 Qwen-VL 工具函数
 from qwen_vl_utils.vision_process import smart_resize
+
+# 导入 PyTorch 张量类型和分布
 from torch import Tensor
 from torch.distributions import Beta
 from torch.nn import CrossEntropyLoss
+
+# 导入常微分方程求解器，用于扩散模型的ODE采样
 from torchdiffeq import odeint
+
+# 导入 HuggingFace Transformers 相关模块
 from transformers import AutoProcessor, BatchFeature
-from transformers.cache_utils import (
-    StaticCache,
-)
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
-    Qwen2_5_VLForConditionalGeneration,
-)
+from transformers.cache_utils import StaticCache
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 from transformers.utils import is_torchdynamo_compiling, logging
 
+# 导入 LeRobot 框架相关模块
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import populate_queues
 from lerobot.policies.wall_x.configuration_wall_x import WallXConfig
 from lerobot.policies.wall_x.constant import (
-    GENERATE_SUBTASK_RATIO,
-    IMAGE_FACTOR,
-    MAX_PIXELS,
-    MIN_PIXELS,
-    MODEL_TYPE,
-    PRIORITY_ORDER,
-    RESOLUTION,
-    TOKENIZER_MAX_LENGTH,
+    GENERATE_SUBTASK_RATIO,  # 生成子任务的比例
+    IMAGE_FACTOR,            # 图像缩放因子
+    MAX_PIXELS,              # 最大像素数
+    MIN_PIXELS,              # 最小像素数
+    MODEL_TYPE,              # 模型类型
+    PRIORITY_ORDER,          # 优先级顺序
+    RESOLUTION,              # 分辨率
+    TOKENIZER_MAX_LENGTH,    # 分词器最大长度
 )
+# 导入自定义的 Qwen 模型配置和组件
 from lerobot.policies.wall_x.qwen_model.configuration_qwen2_5_vl import Qwen2_5_VLConfig
 from lerobot.policies.wall_x.qwen_model.qwen2_5_vl_moe import (
     Qwen2_5_VisionTransformerPretrainedModel,
     Qwen2_5_VLACausalLMOutputWithPast,
     Qwen2_5_VLMoEModel,
 )
+# 导入 Wall-X 工具函数
 from lerobot.policies.wall_x.utils import (
-    get_wallx_normal_text,
-    preprocesser_call,
-    process_grounding_points,
-    replace_action_token,
+    get_wallx_normal_text,          # 生成标准文本指令
+    preprocesser_call,               # 调用处理器
+    process_grounding_points,        # 处理接地点
+    replace_action_token,            # 替换动作令牌
 )
+# 导入 LeRobot 常量
 from lerobot.utils.constants import ACTION, OBS_STATE
 
+# 获取日志记录器
 logger = logging.get_logger(__name__)
 
 
 class SinusoidalPosEmb(nn.Module):
-    """Sinusoidal positional embedding for diffusion timesteps."""
+    """
+    正弦位置嵌入模块。
+    用于扩散模型中的时间步长编码，生成周期性的位置编码。
+    """
 
     def __init__(self, dim):
         super().__init__()
-        self.dim = dim
+        self.dim = dim  # 嵌入维度
 
     def forward(self, x):
+        """
+        前向传播：根据输入时间步 x 生成位置嵌入。
+
+        参数：
+            x: 形状为 (batch_size,) 的时间步张量
+
+        返回：
+            形状为 (batch_size, dim) 的正弦位置嵌入
+        """
         device = x.device
         half_dim = self.dim // 2
+        # 计算对数空间的指数底数
         emb = math.log(10000) / (half_dim - 1)
+        # 生成频率向量
         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+        # 将时间步 x 与频率向量相乘
         emb = x[:, None] * emb[None, :]
+        # 拼接正弦和余弦分量，形成最终嵌入
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
 
 class ActionHead(nn.Module):
     """
-    Action prediction head with flow matching.
-
-    Implements Beta-distributed noise scheduling and temporal embeddings
-    for action sequence prediction.
+    动作预测头，基于流匹配（Flow Matching）。
+    使用 Beta 分布进行噪声调度，并为动作序列生成时间嵌入。
+    该模块在训练时对动作进行加噪，并预测从噪声到真实动作的“流”（flow）。
     """
 
     def __init__(self, config):
         super().__init__()
-
         self.config = config
+        # 计算动作维度（所有自由度之和）
         self.action_dim = sum(config.dof_config.values())
+        # 计算本体感知维度（所有智能体位置参数之和）
         self.propri_dim = sum(config.agent_pos_config.values())
-        self.hidden_size = config.hidden_size
+        self.hidden_size = config.hidden_size  # 隐藏层维度
 
-        # Beta distribution for noise scheduling
+        # Beta 分布参数，用于噪声调度
         self.beta_alpha = 1.5
         self.beta_beta = 1.0
-        self.s = 0.999
+        self.s = 0.999  # 时间缩放因子
 
-        # Sinusoidal timestep embedding
+        # 时间步嵌入模块
         self.time_embed = SinusoidalPosEmb(config.hidden_size)
 
-        # Action embedding network
-        # *2 for action + DOF mask concatenation
+        # 动作嵌入网络
+        # w1: 输入为 [动作 + DOF掩码] -> 隐藏层
         self.w1 = nn.Linear(self.action_dim * 2, self.hidden_size, bias=False)
-        self.w2 = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=False)  # *2 for action + time
+        # w2: 输入为 [动作嵌入 + 时间嵌入] -> 隐藏层
+        self.w2 = nn.Linear(self.hidden_size * 2, self.hidden_size, bias=False)
+        # w3: 从隐藏层到隐藏层的变换
         self.w3 = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.act_fn = nn.SiLU()
+        self.act_fn = nn.SiLU()  # Sigmoid Linear Unit 激活函数
 
-        # Project back to action space
+        # 将隐藏状态投影回动作空间
         self.action_proj_back = nn.Linear(self.hidden_size, self.action_dim, bias=False)
 
-        # Proprioception projection
+        # 本体感知投影网络（输入为本体感知 + DOF掩码）
         self.propri_proj = nn.Linear(self.propri_dim * 2, self.hidden_size, bias=False)
 
     def sample_time(self, batch_size, device):
-        """Sample timesteps using Beta distribution (always in float32 for numerical stability)."""
+        """
+        使用 Beta 分布采样时间步 t（始终使用 float32 以保证数值稳定性）。
+
+        参数：
+            batch_size: 批量大小
+            device: 设备
+
+        返回：
+            形状为 (batch_size,) 的采样时间步张量
+        """
         beta_dist = Beta(
             torch.tensor(self.beta_alpha, dtype=torch.float32, device=device),
             torch.tensor(self.beta_beta, dtype=torch.float32, device=device),
@@ -155,42 +199,45 @@ class ActionHead(nn.Module):
 
     def forward(self, action_chunk, dof_mask=None):
         """
-        Process action sequences with noise injection for training.
+        训练阶段的前向传播：对动作序列注入噪声，并计算对应的流（flow）。
 
-        Args:
-            action_chunk: Action sequences [batch, seq_len, action_dim]
-            dof_mask: DOF mask [batch, seq_len, action_dim]
+        参数：
+            action_chunk: 动作序列 [batch, seq_len, action_dim]
+            dof_mask: 自由度掩码 [batch, seq_len, action_dim]，标记有效自由度
 
-        Returns:
-            tuple: (action_embeddings, flow_target)
+        返回：
+            tuple: (动作嵌入, 流目标)
         """
         batch_size = action_chunk.shape[0]
         device = action_chunk.device
-        weight_dtype = self.w1.weight.dtype
+        weight_dtype = self.w1.weight.dtype  # 获取网络权重的数据类型
 
-        # Sample time outside of autocast (Beta distribution needs float32)
+        # 采样时间步（在 autocast 之外进行，Beta分布需要 float32）
         time = self.sample_time(batch_size, device)
-        t = time.unsqueeze(-1).unsqueeze(-1)
+        t = time.unsqueeze(-1).unsqueeze(-1)  # 扩展维度以便广播
 
-        # Noise and flow computation in float32
+        # 在 float32 下计算噪声和流，以保证数值稳定性
         noise = torch.randn_like(action_chunk, dtype=torch.float32)
         action_chunk_f32 = action_chunk.to(torch.float32)
+        # 线性插值：带噪动作 = (1-t) * 噪声 + t * 真实动作
         noisy_action = (1 - t) * noise + t * action_chunk_f32
+        # 流目标 = 真实动作 - 噪声
         flow = action_chunk_f32 - noise
 
-        # Project noisy actions
+        # 如果提供了自由度掩码，则将其与带噪动作拼接
         if dof_mask is not None:
             noisy_action = torch.cat([noisy_action, dof_mask.to(torch.float32)], dim=-1)
 
-        # Convert to weight dtype for linear layers
+        # 将带噪动作转换为网络权重的数据类型，输入线性层
         noisy_action = noisy_action.to(dtype=weight_dtype)
         action_embed = self.w1(noisy_action)
 
-        # Generate time embeddings and combine
+        # 生成时间嵌入
         time_embed = self.time_embed(time)
         time_embed = time_embed.unsqueeze(1).repeat(1, action_embed.shape[1], 1)
         time_embed = time_embed.to(dtype=weight_dtype)
 
+        # 拼接动作嵌入和时间嵌入
         concat_embed = torch.cat([action_embed, time_embed], dim=-1)
         concat_embed = self.w2(concat_embed)
         embed = self.w3(self.act_fn(concat_embed))
@@ -198,7 +245,17 @@ class ActionHead(nn.Module):
         return embed, flow
 
     def step(self, timestep, noisy_action, dof_mask=None):
-        """Single denoising step for inference."""
+        """
+        推理阶段的一个去噪步骤。
+
+        参数：
+            timestep: 当前时间步
+            noisy_action: 带噪动作
+            dof_mask: 自由度掩码
+
+        返回：
+            当前时间步的动作嵌入
+        """
         weight_dtype = self.w1.weight.dtype
 
         if dof_mask is not None:
@@ -218,8 +275,18 @@ class ActionHead(nn.Module):
         return embed
 
     def flow_loss(self, action_hidden_states, flow, dof_mask=None):
-        """Compute flow matching loss (all computations in float32 for stability)."""
-        # Ensure all inputs are float32
+        """
+        计算流匹配损失（MSE）。
+
+        参数：
+            action_hidden_states: 预测的隐藏状态
+            flow: 真实的流目标
+            dof_mask: 自由度掩码
+
+        返回：
+            计算得到的损失张量
+        """
+        # 将所有输入转为 float32 以保证稳定性
         action_hidden_states = action_hidden_states.to(torch.float32)
         flow = flow.to(torch.float32)
 
@@ -228,24 +295,30 @@ class ActionHead(nn.Module):
 
         if dof_mask is not None:
             dof_mask = dof_mask.reshape(-1, dof_mask.shape[-1]).to(torch.float32)
-            loss = loss * dof_mask
+            loss = loss * dof_mask  # 仅对有效自由度计算损失
 
         return loss
 
     def proprioception_proj(self, proprioception, dof_mask=None, use_history=False):
-        """Project proprioceptive data to hidden space."""
-        # Ensure proper device and dtype alignment
+        """
+        将本体感知数据投影到隐藏空间。
+
+        参数：
+            proprioception: 本体感知数据 [batch, seq_len, prop_dim]
+            dof_mask: 自由度掩码
+            use_history: 是否使用历史信息（此处未使用，但为接口保留）
+
+        返回：
+            投影后的隐藏状态
+        """
+        # 确保数据类型和设备与权重对齐
         proprioception = proprioception.to(device=self.propri_proj.weight.device).to(
             dtype=self.propri_proj.weight.dtype
         )
 
         if dof_mask is not None:
-            # Concatenate proprioception with DOF mask
-            # TODO: Use variable-based dimension checking for better flexibility
-            if use_history:
-                proprioception = torch.cat([proprioception, dof_mask], dim=-1)
-            else:
-                proprioception = torch.cat([proprioception, dof_mask], dim=-1)
+            # 将本体感知数据与自由度掩码拼接
+            proprioception = torch.cat([proprioception, dof_mask], dim=-1)
 
         proprioception = proprioception.to(device=self.propri_proj.weight.device).to(
             dtype=self.propri_proj.weight.dtype
@@ -255,17 +328,19 @@ class ActionHead(nn.Module):
 
 class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
     """
-    Qwen2.5 Vision-Language Mixture of Experts model for action processing.
-
-    This model extends the base Qwen2.5 VL model with action token processing capabilities
-    and optional LoRA fine-tuning support.
+    用于动作处理的 Qwen2.5 视觉-语言混合专家（MoE）模型。
+    该类扩展了基础的 Qwen2.5 VL 模型，添加了动作令牌处理能力，
+    并可选地支持 LoRA 微调。
     """
 
+    # 定义权重绑定的键（语言模型头与嵌入层共享权重）
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
-    config_class = Qwen2_5_VLConfig
+    config_class = Qwen2_5_VLConfig  # 关联的配置类
+    # 指定不应拆分的模块（用于模型并行）
     _no_split_modules = ["Qwen2_5_VLDecoderLayer_with_MoE", "Qwen2_5_VLVisionBlock"]
 
     def init_weights(self):
+        """初始化权重。如果语言模型组件已存在，则跳过基类的初始化。"""
         if getattr(self.model, "language_model", None) is not None:
             return
         super().init_weights()
@@ -286,18 +361,25 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         **kwargs: Any,
     ):
         """
-        Load model from pretrained model path.
+        从预训练路径加载模型。
 
-        Args:
-            pretrained_model_path (str): Model directory path containing model.safetensors file
-            config_path (str, optional): Configuration file path, if None will look for qwen25_config.json in pretrained_model_path
-            action_tokenizer_path (str, optional): Action tokenizer path, if None will load from default config
-            attn_implementation (str, optional): Attention implementation, if None will load from default config
-            **kwargs: Additional arguments
+        参数：
+            pretrained_name_or_path: 预训练模型路径
+            config: 模型配置，若为 None 则自动加载
+            action_tokenizer_path: 动作分词器路径
+            attn_implementation: 注意力实现方式（如 "eager", "flash_attention_2"）
+            cache_dir: 缓存目录
+            force_download: 是否强制下载
+            local_files_only: 是否仅使用本地文件
+            token: 认证令牌
+            revision: 模型版本
+            strict: 是否严格加载状态字典
+            **kwargs: 其他参数
 
-        Returns:
-            Qwen2_5_VLMoEForAction: Loaded model instance
+        返回：
+            加载好的 Qwen2_5_VLMoEForAction 模型实例
         """
+        # 如果未提供配置，则从预训练路径加载
         if config is None:
             config = cls.config_class.from_pretrained(
                 pretrained_name_or_path,
@@ -311,6 +393,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             )
         if attn_implementation is not None:
             config._attn_implementation = attn_implementation
+
+        # 加载处理器
         processor = AutoProcessor.from_pretrained(pretrained_name_or_path, use_fast=True)
         if action_tokenizer_path is not None:
             action_tokenizer = AutoProcessor.from_pretrained(action_tokenizer_path, trust_remote_code=True)
@@ -318,22 +402,23 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         else:
             action_tokenizer = None
 
-        # add pad_token_id to config
+        # 将 pad_token_id 添加到配置中
         config.pad_token_id = processor.tokenizer.pad_token_id
         config.text_config.pad_token_id = processor.tokenizer.pad_token_id
 
-        # Initialize model with configuration and processor
+        # 初始化模型
         model = cls(config, processor=processor, action_tokenizer=action_tokenizer, **kwargs)
 
-        # Resize token embeddings to match processor tokenizer vocabulary size
+        # 调整词嵌入大小以匹配分词器词汇表大小
         model.resize_token_embeddings(len(processor.tokenizer))
 
-        # Try to load the model.safetensors file
+        # 尝试加载模型权重文件（model.safetensors）
         print(f"Loading model from: {pretrained_name_or_path}")
         try:
             from transformers.utils import cached_file
+            from safetensors.torch import load_file
 
-            # Try safetensors first
+            # 先尝试加载 safetensors 格式
             resolved_file = cached_file(
                 pretrained_name_or_path,
                 "model.safetensors",
@@ -345,8 +430,6 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 revision=kwargs.get("revision"),
                 local_files_only=kwargs.get("local_files_only", False),
             )
-            from safetensors.torch import load_file
-
             sd = load_file(resolved_file)
             print("✓ Loaded state dict from model.safetensors")
         except Exception as e:
@@ -354,8 +437,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             print("Returning model without loading pretrained weights")
             return model
 
+        # 过滤掉归一化器统计参数（这些参数由外部管理）
         state_dict = {}
-        # filter normalizer statistic params
         del_keys = []
         for key in sd.keys():
             if "action_preprocessor.normalizer" in key:
@@ -364,6 +447,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             del sd[key]
         state_dict.update(sd)
 
+        # 非严格加载状态字典（允许缺少某些键）
         model.load_state_dict(state_dict, strict=False)
 
         return model
@@ -378,41 +462,41 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         flow_loss_weight=1.0,
     ):
         """
-        Initialize the Qwen2.5 VLMoE model for action processing.
+        初始化模型。
 
-        Args:
-            config: Model configuration
-            use_fast_tokenizer (bool): Whether to use fast tokenizer
-            processor: Text and image processor
-            action_tokenizer: Action-specific tokenizer
-            action_mapper: Action mapping utility
-            flow_loss_weight (float): Weight for flow loss computation
+        参数：
+            config: 模型配置
+            use_fast_tokenizer: 是否使用快速分词器
+            processor: 文本和图像处理器
+            action_tokenizer: 动作专用分词器
+            action_mapper: 动作映射工具（未使用）
+            flow_loss_weight: 流匹配损失的权重
         """
         super().__init__(config)
 
-        # Initialize vision transformer and language model components
+        # 初始化视觉变换器和语言模型组件
         self.visual = Qwen2_5_VisionTransformerPretrainedModel._from_config(config.vision_config)
-        self.model = Qwen2_5_VLMoEModel(config)
+        self.model = Qwen2_5_VLMoEModel(config)  # 混合专家（MoE）模型
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
-        # Initialize loss function without reduction for channel-wise loss computation
+        # 初始化损失函数（不进行归约，以便逐通道计算损失）
         self.loss_fct = CrossEntropyLoss(reduction="none")
         self.flow_loss_weight = flow_loss_weight
         self.use_fast_tokenizer = use_fast_tokenizer
         self.processor = processor
         self.action_tokenizer = action_tokenizer
 
-        # Define action token IDs
+        # 定义动作令牌 ID 映射
         self.define_action_token_id()
 
-        # Cache for rope deltas
+        # 用于缓存 rope 位置增量
         self.rope_deltas = None
 
-        # Initialize action preprocessor
+        # 初始化动作预处理器（即 ActionHead）
         self.action_preprocessor = ActionHead(config)
 
-        # Apply LoRA if specified in configuration
+        # 如果配置中指定了 LoRA，则添加 LoRA 适配器
         if hasattr(config, "use_lora") and config.use_lora:
             self.add_lora(
                 r=config.lora_r,
@@ -421,42 +505,47 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 lora_dropout=config.lora_dropout,
             )
 
-        # Initialize weights and apply final processing
+        # 初始化权重并应用最终处理
         self.post_init()
 
     def to_bfloat16_for_selected_params(self):
+        """
+        将模型转换为 bfloat16，但将特定参数（层归一化、动作预处理器等）保留为 float32
+        以提高数值稳定性。
+        """
         self.to(dtype=torch.bfloat16)
 
         params_to_keep_float32 = []
 
+        # 确定需要保持为 float32 的参数名称
         for name, param in self.named_parameters():
             if "input_layernorm" in name or "post_attention_layernorm" in name or "model.norm" in name:
                 params_to_keep_float32.append(name)
             if "action_preprocessor" in name:
                 params_to_keep_float32.append(name)
 
+        # 将这些参数的数据类型转回 float32
         for name, param in self.named_parameters():
             if name in params_to_keep_float32:
                 param.data = param.data.to(torch.float32)
 
     def define_action_token_id(self):
         """
-        Define action token IDs based on tokenizer configuration.
-
-        Creates mappings for fast action tokens, proprioception tokens, and general action tokens.
+        根据分词器配置定义动作令牌 ID。
+        创建快速动作令牌列表、本体感知令牌 ID 和动作令牌 ID 的映射。
         """
-        # Create list of fast action token IDs
         fast_action_token_list = []
         if self.use_fast_tokenizer:
+            # 生成所有快速动作令牌的 ID
             for i in range(self.processor.tokenizer.init_kwargs["action_token_vocab_size"]):
                 action_token_id = self.processor.tokenizer.convert_tokens_to_ids(f"<|action_token_{i}|>")
                 fast_action_token_list.append(action_token_id)
 
-        # Get special action token IDs
+        # 获取特殊动作令牌的 ID
         action_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|action|>")
         propri_token_id = self.processor.tokenizer.convert_tokens_to_ids("<|propri|>")
 
-        # Store action token ID mappings
+        # 存储到字典中
         self.action_token_id_set = {
             "fast_action_token_list": fast_action_token_list,
             "propri_token_id": propri_token_id,
@@ -465,13 +554,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
     def add_lora(self, r=8, lora_alpha=32, target_modules=["q_proj", "v_proj"], lora_dropout=0.1):
         """
-        Add LoRA (Low-Rank Adaptation) adapters to the model.
+        向模型添加 LoRA（低秩适应）适配器。
 
-        Args:
-            r (int): Rank of adaptation
-            lora_alpha (int): LoRA scaling parameter
-            target_modules (list): List of module names to apply LoRA to
-            lora_dropout (float): Dropout probability for LoRA layers
+        参数：
+            r: 秩
+            lora_alpha: 缩放参数
+            target_modules: 要应用 LoRA 的模块名称列表
+            lora_dropout: Dropout 概率
         """
         config = LoraConfig(
             r=r,
@@ -483,31 +572,32 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         )
         self.model = get_peft_model(self.model, config)
 
-        # Print information about trainable parameters
+        # 打印可训练参数信息
         self.model.print_trainable_parameters()
+        print("==============use lora===================")
 
     def get_input_embeddings(self):
-        """Get input embeddings layer."""
+        """返回输入嵌入层。"""
         return self.model.embed_tokens
 
     def set_input_embeddings(self, value):
-        """Set input embeddings layer."""
+        """设置输入嵌入层。"""
         self.model.embed_tokens = value
 
     def get_output_embeddings(self):
-        """Get output embeddings layer."""
+        """返回输出嵌入层（语言模型头）。"""
         return self.lm_head
 
     def set_output_embeddings(self, new_embeddings):
-        """Set output embeddings layer."""
+        """设置输出嵌入层。"""
         self.lm_head = new_embeddings
 
     def set_decoder(self, decoder):
-        """Set the decoder model."""
+        """设置解码器模型。"""
         self.model = decoder
 
     def get_decoder(self):
-        """Get the decoder model."""
+        """返回解码器模型。"""
         return self.model
 
     def get_rope_index(
@@ -519,31 +609,22 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Calculate 3D RoPE (Rotary Position Embedding) indices for vision and text tokens.
+        为视觉和文本令牌计算 3D RoPE（旋转位置嵌入）索引。
 
-        This method computes position embeddings that account for the temporal, height, and width
-        dimensions of vision tokens (images/videos) while maintaining standard 1D position embeddings
-        for text tokens.
+        该方法处理视觉令牌（图像/视频）的 3D 位置嵌入（时间、高度、宽度），
+        并为文本令牌使用标准的 1D 位置嵌入。
 
-        For vision tokens, 3D position embeddings are calculated based on:
-        - Temporal dimension: Time patches in videos
-        - Height dimension: Vertical patches in images/video frames
-        - Width dimension: Horizontal patches in images/video frames
+        参数：
+            input_ids: 输入令牌 ID
+            image_grid_thw: 图像网格尺寸（每个图像的 [时间, 高度, 宽度]）
+            video_grid_thw: 视频网格尺寸
+            second_per_grid_ts: 每个网格的时间间隔（用于视频）
+            attention_mask: 注意力掩码
 
-        For text tokens, standard 1D position embeddings are used, continuing from the maximum
-        vision position ID plus 1.
-
-        Args:
-            input_ids (torch.LongTensor, optional): Input token IDs of shape (batch_size, sequence_length)
-            image_grid_thw (torch.LongTensor, optional): Image grid dimensions (num_images, 3) for [temporal, height, width]
-            video_grid_thw (torch.LongTensor, optional): Video grid dimensions (num_videos, 3) for [temporal, height, width]
-            second_per_grid_ts (torch.Tensor, optional): Time interval per temporal grid (num_videos,)
-            attention_mask (torch.Tensor, optional): Attention mask (batch_size, sequence_length)
-
-        Returns:
-            tuple:
-                - position_ids (torch.LongTensor): 3D position IDs of shape (3, batch_size, sequence_length)
-                - mrope_position_deltas (torch.Tensor): Position deltas for mRoPE of shape (batch_size, 1)
+        返回：
+            tuple: (position_ids, mrope_position_deltas)
+                position_ids: 形状为 (3, batch_size, sequence_length) 的位置 ID
+                mrope_position_deltas: 形状为 (batch_size, 1) 的位置增量
         """
         spatial_merge_size = self.config.vision_config.spatial_merge_size
         image_token_id = self.config.image_token_id
@@ -556,7 +637,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             if attention_mask is None:
                 attention_mask = torch.ones_like(total_input_ids)
 
-            # Initialize 3D position IDs tensor
+            # 初始化 3D 位置 ID 张量
             position_ids = torch.ones(
                 3,
                 input_ids.shape[0],
@@ -568,12 +649,12 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             image_index, video_index = 0, 0
             attention_mask = attention_mask.to(total_input_ids.device)
 
-            # Process each sequence in the batch
+            # 逐样本处理
             for i, input_ids in enumerate(total_input_ids):
                 input_ids = input_ids[attention_mask[i] == 1]
                 image_nums, video_nums = 0, 0
 
-                # Find vision tokens and count images/videos
+                # 找到视觉令牌并统计图像/视频数量
                 vision_start_indices = torch.argwhere(input_ids == vision_start_token_id).squeeze(1)
                 vision_tokens = input_ids[vision_start_indices + 1]
                 image_nums = (vision_tokens == image_token_id).sum()
@@ -584,9 +665,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 st = 0
                 remain_images, remain_videos = image_nums, video_nums
 
-                # Process each vision token (image or video)
+                # 处理每个视觉令牌（图像或视频）
                 for _ in range(image_nums + video_nums):
-                    # Find next image or video token
+                    # 查找下一个图像或视频令牌的位置
                     if image_token_id in input_tokens and remain_images > 0:
                         ed_image = input_tokens.index(image_token_id, st)
                     else:
@@ -597,9 +678,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     else:
                         ed_video = len(input_tokens) + 1
 
-                    # Determine if processing image or video token
+                    # 根据位置决定处理图像还是视频
                     if ed_image < ed_video:
-                        # Process image token
+                        # 处理图像
                         t, h, w = (
                             image_grid_thw[image_index][0],
                             image_grid_thw[image_index][1],
@@ -610,7 +691,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                         remain_images -= 1
                         ed = ed_image
                     else:
-                        # Process video token
+                        # 处理视频
                         t, h, w = (
                             video_grid_thw[video_index][0],
                             video_grid_thw[video_index][1],
@@ -624,7 +705,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                         remain_videos -= 1
                         ed = ed_video
 
-                    # Calculate grid dimensions after spatial merging
+                    # 空间合并后的网格尺寸
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t.item(),
                         h.item() // spatial_merge_size,
@@ -632,22 +713,22 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     )
                     text_len = ed - st
 
-                    # Add position IDs for text tokens before vision token
+                    # 为视觉令牌前的文本令牌添加位置 ID
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                     llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                    # Calculate 3D position embeddings for vision tokens
+                    # 计算视觉令牌的 3D 位置嵌入
                     range_tensor = torch.arange(llm_grid_t).view(-1, 1)
                     expanded_range = range_tensor.expand(-1, llm_grid_h * llm_grid_w)
 
-                    # Calculate temporal position IDs with time scaling
+                    # 计算时间位置 ID（带时间缩放）
                     time_tensor = (
                         expanded_range * second_per_grid_t * self.config.vision_config.tokens_per_second
                     )
                     time_tensor_long = time_tensor.long()
                     t_index = time_tensor_long.flatten()
 
-                    # Calculate spatial position IDs
+                    # 计算空间位置 ID（高度和宽度）
                     h_index = (
                         torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
                     )
@@ -655,17 +736,17 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                         torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
                     )
 
-                    # Add 3D position IDs for vision tokens
+                    # 将视觉令牌的 3D 位置 ID 添加到列表中
                     llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
-                # Add position IDs for remaining text tokens
+                # 添加剩余文本令牌的位置 ID
                 if st < len(input_tokens):
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                     text_len = len(input_tokens) - st
                     llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                # Concatenate all position IDs for this sequence
+                # 拼接该样本的所有位置 ID
                 llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
                 position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
                 mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
@@ -673,7 +754,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             mrope_position_deltas = torch.tensor(mrope_position_deltas, device=input_ids.device).unsqueeze(1)
             return position_ids, mrope_position_deltas
         else:
-            # Handle case without vision tokens - use standard 1D position embeddings
+            # 没有视觉令牌的情况：使用标准 1D 位置嵌入
             if attention_mask is not None:
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
@@ -701,7 +782,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         position_ids: torch.LongTensor | None = None,
         past_key_values: list[torch.FloatTensor] | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
-        moe_token_types: torch.LongTensor | None = None,  # MoE token type assignments
+        moe_token_types: torch.LongTensor | None = None,  # MoE 令牌类型分配
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
         output_attentions: bool | None = None,
@@ -711,8 +792,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         pixel_values_videos: torch.FloatTensor | None = None,
         image_grid_thw: torch.LongTensor | None = None,
         video_grid_thw: torch.LongTensor | None = None,
-        action_chunk: torch.FloatTensor | None = None,  # Action trajectory chunks
-        proprioception: torch.FloatTensor | None = None,  # Joint position/orientation data
+        action_chunk: torch.FloatTensor | None = None,  # 动作轨迹块
+        proprioception: torch.FloatTensor | None = None,  # 关节位置/方向数据
         rope_deltas: torch.LongTensor | None = None,
         cache_position: torch.LongTensor | None = None,
         second_per_grid_ts: torch.Tensor | None = None,
@@ -721,44 +802,42 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         **kwargs,
     ) -> tuple | Qwen2_5_VLACausalLMOutputWithPast:
         """
-        Forward pass for training with multi-modal inputs including vision, text, and action data.
+        训练阶段的前向传播，处理多模态输入（视觉、文本、动作）。
 
-        This method handles the complete forward pass during training, processing various input modalities
-        including images, videos, text, proprioceptive data, and action sequences. It computes losses
-        for both language modeling and action prediction using flow matching.
+        该方法处理图像、视频、文本、本体感知数据和动作序列，计算语言建模损失
+        和流匹配损失。
 
-        Args:
-            input_ids (torch.LongTensor, optional): Input token IDs
-            attention_mask (torch.Tensor, optional): Attention mask for input tokens
-            position_ids (torch.LongTensor, optional): Position IDs for tokens
-            past_key_values (List[torch.FloatTensor], optional): Cached key-value pairs for generation
-            inputs_embeds (torch.FloatTensor, optional): Pre-computed input embeddings
-            moe_token_types (torch.LongTensor, optional): Token type assignments for MoE routing
-            labels (torch.LongTensor, optional): Target labels for loss computation
-            use_cache (bool, optional): Whether to use key-value caching
-            output_attentions (bool, optional): Whether to return attention weights
-            output_hidden_states (bool, optional): Whether to return hidden states
-            return_dict (bool, optional): Whether to return structured output
-            pixel_values (torch.Tensor, optional): Image pixel values
-            pixel_values_videos (torch.FloatTensor, optional): Video pixel values
-            image_grid_thw (torch.LongTensor, optional): Image grid dimensions (temporal, height, width)
-            video_grid_thw (torch.LongTensor, optional): Video grid dimensions (temporal, height, width)
-            action_chunk (torch.FloatTensor, optional): Action trajectory data chunks
-            proprioception (torch.FloatTensor, optional): Proprioceptive sensor data (joint positions, etc.)
-            rope_deltas (torch.LongTensor, optional): RoPE position deltas
-            cache_position (torch.LongTensor, optional): Cache position indices
-            second_per_grid_ts (torch.Tensor, optional): Time interval per temporal grid
-            dof_mask (torch.FloatTensor, optional): Degrees of freedom mask for action tokens
-            agent_pos_mask (torch.FloatTensor, optional): Agent position mask for proprioceptive data
-            **kwargs: Additional keyword arguments
+        参数：
+            input_ids: 输入令牌 ID
+            attention_mask: 注意力掩码
+            position_ids: 位置 ID
+            past_key_values: 缓存的键值对（用于生成）
+            inputs_embeds: 预计算的输入嵌入
+            moe_token_types: MoE 路由的令牌类型分配
+            labels: 损失计算的目标标签
+            use_cache: 是否使用键值缓存
+            output_attentions: 是否返回注意力权重
+            output_hidden_states: 是否返回隐藏状态
+            return_dict: 是否返回结构化输出
+            pixel_values: 图像像素值
+            pixel_values_videos: 视频像素值
+            image_grid_thw: 图像网格尺寸
+            video_grid_thw: 视频网格尺寸
+            action_chunk: 动作轨迹数据块
+            proprioception: 本体感知传感器数据
+            rope_deltas: RoPE 位置增量
+            cache_position: 缓存位置索引
+            second_per_grid_ts: 每个网格的时间间隔
+            dof_mask: 动作令牌的自由度掩码
+            agent_pos_mask: 本体感知数据的智能体位置掩码
+            **kwargs: 其他参数
 
-        Returns:
-            Union[Tuple, Qwen2_5_VLACausalLMOutputWithPast]: Model outputs including losses, logits,
-                and auxiliary information, or tuple if return_dict=False
+        返回：
+            模型输出，包含损失、logits 和辅助信息
         """
         batch_size, seq_length = input_ids.shape
 
-        # Set output configuration from model config if not specified
+        # 从模型配置中设置输出配置（如果未指定）
         output_attentions = (
             output_attentions if output_attentions is not None else self.config.output_attentions
         )
@@ -767,10 +846,10 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # Calculate RoPE position IDs if not provided
-        # Note: Cannot calculate rope deltas with 4D attention mask. TODO: Fix this limitation
+        # 如果未提供位置 ID，则计算 RoPE 位置 ID
+        # 注意：无法使用 4D 注意力掩码计算 rope 增量。TODO: 修复此限制
         if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
-            # Calculate RoPE index once per generation in the pre-fill stage only
+            # 仅在预填充阶段计算一次 RoPE 索引
             if (
                 (cache_position is not None and cache_position[0] == 0)
                 or self.rope_deltas is None
@@ -784,7 +863,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     attention_mask,
                 )
                 self.rope_deltas = rope_deltas
-            # Use previously calculated rope deltas to get correct position IDs
+            # 使用先前计算的 rope 增量来获取正确的位置 ID
             else:
                 delta = (
                     (cache_position[0] + self.rope_deltas).to(self.device)
@@ -793,16 +872,16 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 )
                 position_ids = torch.arange(seq_length, device=self.device)
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                if cache_position is not None:
                     delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-        # Process input embeddings with multi-modal data
+        # 使用多模态数据处理输入嵌入
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids)
 
-            # Process image embeddings
+            # 处理图像嵌入
             if pixel_values is not None:
                 pixel_values = pixel_values.type(self.visual.dtype)
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
@@ -814,14 +893,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            # Process video embeddings
+            # 处理视频嵌入
             if pixel_values_videos is not None:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
                 n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
                 n_video_features = video_embeds.shape[0]
 
-                # Validate video token and feature count match
+                # 验证视频令牌与特征数量匹配
                 if n_video_tokens != n_video_features:
                     raise ValueError(
                         f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
@@ -834,7 +913,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-            # Process proprioceptive data (joint positions, orientations, etc.)
+            # 处理本体感知数据
             if proprioception is not None:
                 proprioception = proprioception.to(inputs_embeds.device).to(inputs_embeds.dtype)
                 agent_pos_mask = agent_pos_mask.to(inputs_embeds.device).to(inputs_embeds.dtype)
@@ -851,9 +930,8 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 proprioception = proprioception.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(proprioception_mask, proprioception)
             elif self.training:
-                # Dummy forward pass to ensure gradient registration in DDP
-                # This handles cases where one process has proprioception data while another doesn't
-                # Without this, DDP would hang waiting for a gradient that will never be computed
+                # DDP 中的虚拟前向传播，以确保梯度注册
+                # 处理某些进程有本体感知数据而其他进程没有的情况
                 dummy_input = torch.randn(
                     2,
                     self.action_preprocessor.propri_dim * 2,
@@ -863,7 +941,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 dummy_loss = sum(p.sum() for p in dummy_forward)
                 inputs_embeds = inputs_embeds + 0 * dummy_loss
 
-            # Process action chunk data
+            # 处理动作块数据
             if action_chunk is not None:
                 action_chunk = action_chunk.to(inputs_embeds.device).to(inputs_embeds.dtype)
                 dof_mask = dof_mask.to(inputs_embeds.device).to(inputs_embeds.dtype)
@@ -879,14 +957,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
-        # Forward pass through the main model
+        # 通过主模型进行前向传播
         outputs = self.model(
             input_ids=None,
             position_ids=position_ids,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            moe_token_types=moe_token_types,  # Pass token types for MoE routing
+            moe_token_types=moe_token_types,  # 传递令牌类型用于 MoE 路由
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
@@ -897,23 +975,22 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         hidden_states = hidden_states.to(self.lm_head.weight.dtype)
         logits = self.lm_head(hidden_states)
 
-        # Initialize loss computation variables
+        # 初始化损失计算变量
         loss = None
         cross_entropy_loss, flow_loss = None, None
         channel_loss_dict = None
         channel_loss_count_dict = None
 
-        # Compute losses if labels are provided
+        # 如果提供了标签，则计算损失,VQA的语音损失
         if labels is not None:
             loss = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32)
 
-            # Compute standard cross-entropy loss for language modeling
+            # 计算标准交叉熵损失（语言建模）
             shift_logits = logits[..., :-1, :].contiguous().to(torch.float32)
             shift_labels = labels[..., 1:].contiguous()
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
 
-            # Enable model parallelism by moving labels to correct device
             shift_labels = shift_labels.to(shift_logits.device)
             non_ignored_mask = shift_labels != -100
             _cross_entropy_loss = self.loss_fct(shift_logits, shift_labels)
@@ -923,13 +1000,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 else torch.tensor(0.0, device=shift_logits.device, dtype=torch.float32)
             )
 
-            # Add cross-entropy loss to total loss if valid
             if not torch.isnan(cross_entropy_loss):
                 loss = loss + cross_entropy_loss.to(torch.float32)
             else:
                 with torch.no_grad():
                     cross_entropy_loss.detach()
 
+        # 计算流匹配损失
         if action_chunk is not None:
             action_mask = input_ids == self.action_token_id_set["action_token_id"]
             if action_mask.any():
@@ -944,7 +1021,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     loss = self.flow_loss_weight * flow_loss.to(torch.float32)
                 _flow_loss = _flow_loss.view(dof_mask.shape[0], dof_mask.shape[1], dof_mask.shape[2])
 
-        # Return outputs based on return_dict setting
+        # 根据 return_dict 设置返回输出
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
@@ -964,14 +1041,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
     def predict_action(self, predict_mode: str, **kwargs):
         """
-        Predict actions using specified prediction mode.
+        使用指定的预测模式预测动作。
 
-        Args:
-            predict_mode (str): Prediction mode, either "fast" or "diffusion"
-            **kwargs: Additional arguments passed to the predict method
+        参数：
+            predict_mode: 预测模式，可选 "fast" 或 "diffusion"
+            **kwargs: 传递给 predict 方法的额外参数
 
-        Returns:
-            tuple: (predicted_action, ground_truth_action) where ground_truth_action may be None
+        返回：
+            tuple: (预测动作, 真实动作) 真实动作可能为 None
         """
         assert predict_mode in ["fast", "diffusion"]
 
@@ -1012,58 +1089,58 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         **kwargs,
     ):
         """
-        Multi-modal prediction method supporting text generation, fast action prediction, and diffusion-based action prediction.
+        多模态预测方法，支持文本生成、快速动作预测和基于扩散的动作预测。
 
-        This method handles three prediction modes:
-        1. "text": Pure text generation using autoregressive decoding
-        2. "fast": Fast action prediction using discrete action tokens
-        3. "diffusion": Continuous action prediction using diffusion/flow matching
+        该方法支持三种预测模式：
+        1. "text": 使用自回归解码进行纯文本生成
+        2. "fast": 使用离散动作令牌进行快速动作预测
+        3. "diffusion": 使用扩散/流匹配进行连续动作预测
 
-        Args:
-            predict_mode (str): Prediction mode ("text", "fast", or "diffusion")
-            pred_horizon (int, optional): Prediction horizon for action sequences
-            action_dim (int, optional): Dimensionality of action space
-            input_ids (torch.LongTensor, optional): Input token IDs
-            attention_mask (torch.Tensor, optional): Attention mask for input tokens
-            position_ids (torch.LongTensor, optional): Position IDs for tokens
-            past_key_values (List[torch.FloatTensor], optional): Cached key-value pairs
-            inputs_embeds (torch.FloatTensor, optional): Pre-computed input embeddings
-            moe_token_types (torch.LongTensor, optional): Token type assignments for MoE routing
-            labels (torch.LongTensor, optional): Target labels for evaluation
-            use_cache (bool, optional): Whether to use key-value caching
-            output_attentions (bool, optional): Whether to return attention weights
-            output_hidden_states (bool, optional): Whether to return hidden states
-            return_dict (bool, optional): Whether to return structured output
-            pixel_values (torch.Tensor, optional): Image pixel values
-            pixel_values_videos (torch.FloatTensor, optional): Video pixel values
-            image_grid_thw (torch.LongTensor, optional): Image grid dimensions
-            video_grid_thw (torch.LongTensor, optional): Video grid dimensions
-            action_chunk (torch.FloatTensor, optional): Ground truth action sequences
-            proprioception (torch.FloatTensor, optional): Proprioceptive sensor data
-            rope_deltas (torch.LongTensor, optional): RoPE position deltas
-            cache_position (torch.LongTensor, optional): Cache position indices
-            second_per_grid_ts (torch.Tensor, optional): Time interval per temporal grid
-            num_inference_timesteps (int, optional): Number of diffusion inference steps
-            dof_mask (torch.FloatTensor, optional): Degrees of freedom mask
-            agent_pos_mask (torch.FloatTensor, optional): Agent position mask
-            re_generate (bool, optional): Whether to use sampling for regeneration
-            **kwargs: Additional keyword arguments
+        参数：
+            predict_mode: 预测模式 ("text", "fast", 或 "diffusion")
+            pred_horizon: 动作序列的预测范围
+            action_dim: 动作空间的维度
+            input_ids: 输入令牌 ID
+            attention_mask: 注意力掩码
+            position_ids: 位置 ID
+            past_key_values: 缓存的键值对
+            inputs_embeds: 预计算的输入嵌入
+            moe_token_types: MoE 令牌类型分配
+            labels: 评估的目标标签
+            use_cache: 是否使用键值缓存
+            output_attentions: 是否返回注意力权重
+            output_hidden_states: 是否返回隐藏状态
+            return_dict: 是否返回结构化输出
+            pixel_values: 图像像素值
+            pixel_values_videos: 视频像素值
+            image_grid_thw: 图像网格尺寸
+            video_grid_thw: 视频网格尺寸
+            action_chunk: 真实动作序列
+            proprioception: 本体感知传感器数据
+            rope_deltas: RoPE 位置增量
+            cache_position: 缓存位置索引
+            second_per_grid_ts: 每个网格的时间间隔
+            num_inference_timesteps: 扩散推理步数
+            dof_mask: 自由度掩码
+            agent_pos_mask: 智能体位置掩码
+            re_generate: 是否使用采样进行重新生成
+            **kwargs: 其他参数
 
-        Returns:
-            dict: Dictionary containing prediction results with keys like:
-                - 'predict_action': Predicted action sequences
-                - 'gt_action': Ground truth actions (if available)
-                - 'input_text': Input text (for text/fast modes)
-                - 'predict_output_text': Generated text (for text/fast modes)
-                - 'gt_output_text': Ground truth text (for text/fast modes)
+        返回：
+            dict: 包含预测结果的字典，键可能包括：
+                - 'predict_action': 预测的动作序列
+                - 'gt_action': 真实动作（如果可用）
+                - 'input_text': 输入文本（文本/快速模式）
+                - 'predict_output_text': 生成的文本（文本/快速模式）
+                - 'gt_output_text': 真实文本（文本/快速模式）
         """
         batch_size = input_ids.shape[0] if input_ids is not None else inputs_embeds.shape[0]
 
-        # Text and fast modes require batch size 1 for autoregressive generation
+        # 文本和快速模式要求批量大小为 1，用于自回归生成
         if predict_mode in ["text", "fast"]:
             assert batch_size == 1, "predict only support batch size 1 for ar generation"
 
-        # Set output configuration from model config if not specified
+        # 从模型配置中设置输出配置（如果未指定）
         output_attentions = (
             output_attentions if output_attentions is not None else self.config.output_attentions
         )
@@ -1072,18 +1149,18 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # Process input embeddings with multi-modal data
+        # 使用多模态数据处理输入嵌入
         if inputs_embeds is None:
             inputs_embeds = self.model.embed_tokens(input_ids)
 
-            # Process image embeddings
+            # 处理图像嵌入
             if pixel_values is not None:
                 pixel_values = pixel_values.type(self.visual.dtype)
                 image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                 n_image_features = image_embeds.shape[0]
 
-                # Validate image token and feature count match
+                # 验证图像令牌与特征数量匹配
                 if n_image_tokens != n_image_features:
                     raise ValueError(
                         f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
@@ -1097,14 +1174,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
 
-            # Process video embeddings
+            # 处理视频嵌入
             if pixel_values_videos is not None:
                 pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
                 video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
                 n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
                 n_video_features = video_embeds.shape[0]
 
-                # Validate video token and feature count match
+                # 验证视频令牌与特征数量匹配
                 if n_video_tokens != n_video_features:
                     raise ValueError(
                         f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
@@ -1118,7 +1195,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
                 inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
 
-            # Process proprioceptive data
+            # 处理本体感知数据
             if proprioception is not None:
                 proprioception = proprioception.to(inputs_embeds.device).to(inputs_embeds.dtype)
                 agent_pos_mask = agent_pos_mask.to(inputs_embeds.device).to(inputs_embeds.dtype)
@@ -1134,10 +1211,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             if attention_mask is not None:
                 attention_mask = attention_mask.to(inputs_embeds.device)
 
-        # Calculate RoPE position IDs if not provided
-        # Note: Cannot calculate rope deltas with 4D attention mask. TODO: Fix this limitation
+        # 如果未提供位置 ID，则计算 RoPE 位置 ID
         if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
-            # Calculate RoPE index once per generation in the pre-fill stage only
+            # 仅在预填充阶段计算一次 RoPE 索引
             if (
                 (cache_position is not None and cache_position[0] == 0)
                 or self.rope_deltas is None
@@ -1151,7 +1227,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     attention_mask,
                 )
                 self.rope_deltas = rope_deltas
-            # Use previously calculated rope deltas to get correct position IDs
+            # 使用先前计算的 rope 增量来获取正确的位置 ID
             else:
                 batch_size, seq_length, _ = inputs_embeds.shape
                 delta = (
@@ -1161,20 +1237,20 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 )
                 position_ids = torch.arange(seq_length, device=inputs_embeds.device)
                 position_ids = position_ids.view(1, -1).expand(batch_size, -1)
-                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                if cache_position is not None:
                     delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
                 position_ids = position_ids.add(delta)
                 position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
 
-        # Prepare action chunk data if provided
+        # 如果提供了动作块，则准备动作块数据
         if action_chunk is not None:
             action_chunk = action_chunk.to(inputs_embeds.device).to(torch.float32)
 
         output = {}
 
-        # Split input sequence for text and fast modes (not needed for diffusion)
+        # 为文本和快速模式分割输入序列（扩散模式不需要）
         if predict_mode == "text" or predict_mode == "fast":
-            # Look for generation prompt tokens: <|im_start|>assistant
+            # 查找生成提示令牌：<|im_start|>assistant
             generation_prompt_ids = torch.tensor(
                 [151644, 77091], device=input_ids.device, dtype=input_ids.dtype
             )
@@ -1184,9 +1260,9 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
             if matches.any():
                 split_pos = torch.nonzero(matches, as_tuple=True)[0][0].item()
-                # Extract ground truth output tokens (including newline)
+                # 提取真实输出令牌（包括换行符）
                 gt_output_ids = input_ids[:, split_pos + 3 :]
-                # Remove output part from input, keeping prompt
+                # 从输入中移除输出部分，只保留提示
                 input_ids = input_ids[:, : split_pos + 3]
                 inputs_embeds = inputs_embeds[:, : split_pos + 3, :]
                 if attention_mask is not None:
@@ -1198,15 +1274,15 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     "input_ids does not contain the generation prompt tokens <|im_start|>assistant"
                 )
 
-            # Decode input text for output
+            # 解码输入文本用于输出
             input_text = self.processor.batch_decode(
                 input_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True
             )
             output["input_text"] = input_text
 
-        # Handle text and fast prediction modes using autoregressive generation
+        # 处理文本和快速预测模式：使用自回归生成
         if predict_mode == "text" or predict_mode == "fast":
-            # Initialize MoE token types for generation
+            # 初始化 MoE 令牌类型用于生成
             moe_token_types = torch.zeros_like(input_ids)
             batch = {
                 "input_ids": input_ids,
@@ -1219,18 +1295,17 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 "proprioception": proprioception,
             }
 
-            # Generate output tokens
             predict_output_ids = self.generate(
                 **batch,
                 max_new_tokens=100,
                 eos_token_id=[self.processor.tokenizer.eos_token_id],
                 use_cache=True,
                 pad_token_id=self.processor.tokenizer.pad_token_id,
-                temperature=(1.0 if not re_generate else 0.7),  # Higher temperature for regeneration
-                do_sample=(False if not re_generate else True),  # Enable sampling for regeneration
+                temperature=(1.0 if not re_generate else 0.7),  # 重新生成时使用更高温度
+                do_sample=(False if not re_generate else True),  # 重新生成时启用采样
             )
 
-            # Decode generated and ground truth text
+            # 解码生成的文本和真实文本
             gt_output_text = self.processor.batch_decode(
                 gt_output_ids,
                 skip_special_tokens=False,
@@ -1243,11 +1318,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             )
             output["gt_output_text"] = gt_output_text
             output["predict_output_text"] = predict_output_text
+            # print("output:", output["predict_output_text"])
+            # print("gt_output_text:", output["gt_output_text"])
+            # print("++++++++++++++++")
 
-        # Convert tokens to actions for fast prediction mode
+        # 将令牌转换为动作（快速预测模式）
         if predict_mode == "fast":
             action_id = []
-            # Extract action tokens from generated sequence
+            # 从生成的序列中提取动作令牌
             for token_id_i in predict_output_ids[0]:
                 if token_id_i.item() >= self.processor.tokenizer.init_kwargs["action_token_start_index"]:
                     action_id.append(
@@ -1257,30 +1335,30 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             predict_action = self.processor.action_processor.decode(
                 [action_id], time_horizon=pred_horizon, action_dim=action_dim
             )
-            # Handle action decoding errors
+            # 处理动作解码错误
             if np.sum(predict_action) == 0:
                 print("Error in decoding action, predict_action is None")
                 output["predict_action"] = None
             else:
-                # Convert discrete tokens to continuous actions
+                # 将离散令牌转换为连续动作
                 predict_action = torch.tensor(predict_action, device=self.device)
                 dof_mask = dof_mask.to(self.device).to(pixel_values.dtype)
-                # removed unnormalization step for now
+                # 暂时移除了反归一化步骤
                 predict_action = predict_action[:, :, dof_mask[0, 0, :].bool()]
                 output["predict_action"] = predict_action
 
-            # Process ground truth actions if available
+            # 处理真实动作（如果可用）
             if action_chunk is not None:
-                # Apply DOF mask to get ground truth actions
-                # removed unnormalization step for now
+                # 应用 DOF 掩码获取真实动作
+                # 暂时移除了反归一化步骤
                 action_chunk = action_chunk[:, :, dof_mask[0, 0, :].bool()]
                 output["gt_action"] = action_chunk
             else:
                 output["gt_action"] = None
 
-        # Handle diffusion-based action prediction
+        # 处理基于扩散的动作预测
         if predict_mode == "diffusion":
-            # Initialize with random noise
+            # 从随机噪声开始
             noisy_action = torch.randn(
                 size=(batch_size, pred_horizon, action_dim),
                 dtype=torch.float32,
@@ -1290,33 +1368,33 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
             def step(timestep, noisy_action):
                 """
-                Single denoising step for diffusion process.
+                扩散过程的单步去噪函数。
 
-                Args:
-                    timestep: Current diffusion timestep
-                    noisy_action: Current noisy action estimate
+                参数：
+                    timestep: 当前扩散时间步
+                    noisy_action: 当前带噪动作估计
 
-                Returns:
-                    torch.Tensor: Predicted clean action
+                返回：
+                    torch.Tensor: 预测的干净动作
                 """
                 action_mask = input_ids == self.action_token_id_set["action_token_id"]
                 assert action_mask.any(), "No action token found in input_ids"
 
-                # Prepare timestep for batch processing
+                # 为批量处理准备时间步
                 timestep = timestep.unsqueeze(0).repeat(noisy_action.shape[0])
                 action_embed = self.action_preprocessor.step(
                     timestep=timestep, noisy_action=noisy_action, dof_mask=dof_mask
                 )
                 action_embed = action_embed.reshape(-1, inputs_embeds.shape[-1])
 
-                # Ensure action_embed has the correct dtype and device before assignment
+                # 在赋值前确保 action_embed 具有正确的 dtype 和设备
                 action_embed = action_embed.to(dtype=inputs_embeds.dtype, device=inputs_embeds.device)
 
-                # Create temporary copy of embeddings (clone preserves dtype)
+                # 创建输入嵌入的临时副本（clone 保留 dtype）
                 temp_inputs_embeds = inputs_embeds.clone()
                 temp_inputs_embeds[action_mask] = action_embed
 
-                # Forward pass through transformer
+                # 通过 Transformer 进行前向传播
                 transformer_outputs = self.model(
                     input_ids=None,
                     attention_mask=attention_mask,
@@ -1330,14 +1408,14 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     return_dict=True,
                 )
 
-                # Extract action predictions from hidden states
+                # 从隐藏状态中提取动作预测
                 hidden_states = transformer_outputs.last_hidden_state
                 action_mask = input_ids == self.action_token_id_set["action_token_id"]
                 action_hidden_states = hidden_states[action_mask].to(torch.float32)
                 pred = self.action_preprocessor.action_proj_back(action_hidden_states)
                 return pred.reshape(batch_size, pred_horizon, action_dim)
 
-            # Perform ODE integration for diffusion sampling
+            # 执行 ODE 积分进行扩散采样
             times = torch.linspace(
                 0,
                 1,
@@ -1347,13 +1425,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             )
             action_trajectory = odeint(step, noisy_action, times, method="euler")
 
-            # Extract final predicted action
-            # Removed unnormalization step for now
+            # 提取最终预测的动作
+            # 暂时移除了反归一化步骤
             predict_action = action_trajectory[-1]
             output["predict_action"] = predict_action
 
-            # Process ground truth actions if available
-            # removed unnormalization step for now
+            # 处理真实动作（如果可用）
+            # 暂时移除了反归一化步骤
             if action_chunk is not None:
                 output["gt_action"] = action_chunk[:, :, dof_mask[0, 0, :].bool()]
 
@@ -1361,25 +1439,23 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
     def forward(self, mode: str | None = None, predict_mode: str | None = "text", **kwargs):
         """
-        Main forward pass dispatcher for different execution modes.
+        主前向传播调度器，根据指定模式路由到不同的前向函数。
 
-        This method routes execution to appropriate forward functions based on the specified mode:
-        - No mode (None): Training step with gradient disabled
-        - 'predict': Prediction/inference mode
-        - 'train': Training mode with gradients enabled
-        - 'validate': Validation mode with gradients disabled
+        模式：
+        - 无模式（None）：禁用梯度的训练步骤
+        - 'predict'：预测/推理模式
+        - 'train'：启用梯度的训练模式
+        - 'validate'：禁用梯度的验证模式
 
-        Args:
-            mode (str, optional): Execution mode. If None, defaults to training step without gradients
-            predict_mode (str, optional): Prediction mode for 'predict' mode ("text", "fast", or "diffusion")
-            **kwargs: Additional arguments passed to the selected forward function
+        参数：
+            mode: 执行模式
+            predict_mode: 'predict' 模式的预测模式（"text", "fast", 或 "diffusion"）
+            **kwargs: 传递给选定前向函数的额外参数
 
-        Returns:
-            Model outputs appropriate for the selected mode
-
-        Todo:
-            - Add support for distinguishing multi-modal data types in prediction mode
+        返回：
+            选定模式对应的模型输出
         """
+
         if not mode:
             with torch.no_grad():
                 return self.train_step_forward(**kwargs)
@@ -1414,89 +1490,85 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         **kwargs,
     ):
         """
-        Prepare inputs for autoregressive generation with multi-modal support.
+        为自回归生成准备输入，支持多模态数据。
 
-        This method handles input preparation for generation, including proper slicing of inputs
-        based on cache position, MoE token type management, and multi-modal data handling.
-        Vision inputs are selectively forwarded only when needed during generation.
+        该方法处理输入准备，包括根据缓存位置对输入进行切片、MoE 令牌类型管理
+        以及多模态数据处理。视觉输入仅在生成期间需要时选择性传递。
 
-        Args:
-            input_ids: Input token IDs
-            past_key_values: Cached key-value pairs from previous generation steps
-            attention_mask: Attention mask for input tokens
-            inputs_embeds: Pre-computed input embeddings
-            moe_token_types: Token type assignments for MoE routing
-            cache_position: Current cache position for generation
-            position_ids: Position IDs for tokens
-            use_cache: Whether to use key-value caching
-            pixel_values: Image pixel values
-            pixel_values_videos: Video pixel values
-            image_grid_thw: Image grid dimensions
-            video_grid_thw: Video grid dimensions
-            second_per_grid_ts: Time interval per temporal grid
-            proprioception: Proprioceptive sensor data
-            dof_mask: Degrees of freedom mask
-            agent_pos_mask: Agent position mask
-            **kwargs: Additional arguments
+        参数：
+            input_ids: 输入令牌 ID
+            past_key_values: 先前生成步骤的缓存键值对
+            attention_mask: 注意力掩码
+            inputs_embeds: 预计算的输入嵌入
+            moe_token_types: MoE 路由的令牌类型分配
+            cache_position: 当前生成缓存位置
+            position_ids: 位置 ID
+            use_cache: 是否使用键值缓存
+            pixel_values: 图像像素值
+            pixel_values_videos: 视频像素值
+            image_grid_thw: 图像网格尺寸
+            video_grid_thw: 视频网格尺寸
+            second_per_grid_ts: 每个网格的时间间隔
+            proprioception: 本体感知传感器数据
+            dof_mask: 自由度掩码
+            agent_pos_mask: 智能体位置掩码
+            **kwargs: 其他参数
 
-        Returns:
-            dict: Prepared model inputs for generation step
+        返回：
+            dict: 为生成步骤准备好的模型输入
 
-        Todo:
-            - Test this function thoroughly with various input configurations
-
-        Note:
-            This is an overridden method that handles specific cases for multi-modal generation:
-            - Slices input_ids through cache_position to keep only unprocessed tokens
-            - Handles special cases for input_embeds, generation methods, and GPU synchronization
-            - Manages vision inputs to avoid unnecessary forward passes
+        注意：
+            这是一个重写方法，处理多模态生成的具体情况：
+            - 通过 cache_position 对 input_ids 进行切片，只保留未处理的令牌
+            - 处理 input_embeds、生成方法和 GPU 同步的特殊情况
+            - 管理视觉输入，避免不必要的前向传播
         """
-        # Initialize MoE token types if not provided
+        # 如果未提供 MoE 令牌类型，则初始化
         if moe_token_types is None:
             moe_token_types = torch.zeros_like(
                 input_ids
-            )  # FIXME: Handle case when input_embeds is used instead
+            )  # FIXME: 处理使用 input_embeds 的情况
         else:
-            # Ensure moe_token_types length matches input_ids
+            # 确保 moe_token_types 长度与 input_ids 匹配
             if moe_token_types.shape[1] < input_ids.shape[1]:
-                # Calculate required padding length
+                # 计算需要的填充长度
                 pad_length = input_ids.shape[1] - moe_token_types.shape[1]
-                # Create padding tensor with default token type (0)
+                # 创建默认令牌类型（0）的填充张量
                 pad_tensor = torch.zeros(
                     (moe_token_types.shape[0], pad_length),
                     dtype=moe_token_types.dtype,
                     device=moe_token_types.device,
                 )
-                # Concatenate padding to existing moe_token_types
+                # 将填充拼接到现有的 moe_token_types
                 moe_token_types = torch.cat([moe_token_types, pad_tensor], dim=1)
 
-        # Handle input slicing based on cache state and special cases
+        # 根据缓存状态和特殊情况处理输入切片
         if past_key_values is not None:
-            if inputs_embeds is not None and input_ids.shape[1] == 0:  # Exception 4: input_embeds case
+            if inputs_embeds is not None and input_ids.shape[1] == 0:  # 例外4：input_embeds 情况
                 inputs_embeds = inputs_embeds[:, -cache_position.shape[0] :]
                 moe_token_types = moe_token_types[:, -cache_position.shape[0] :]
-            elif inputs_embeds is not None or (  # Exception 1: input_embeds provided
+            elif inputs_embeds is not None or (  # 例外1：提供了 input_embeds
                 is_torchdynamo_compiling() or cache_position[-1] >= input_ids.shape[1]
-            ):  # Exception 3: GPU sync edge case
+            ):  # 例外3：GPU 同步边缘情况
                 input_ids = input_ids[:, -cache_position.shape[0] :]
                 moe_token_types = moe_token_types[:, -cache_position.shape[0] :]
-            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (Exception 2 is no-op)
+            elif input_ids.shape[1] != cache_position.shape[0]:  # 默认情况（例外2 是无操作）
                 cache_pos = cache_position.clone()
                 input_ids = input_ids[:, cache_pos]
                 moe_token_types = moe_token_types[:, cache_pos]
 
-        # Skip vision inputs for continuation steps (not initial generation)
+        # 对于连续步骤（非初始生成），跳过视觉输入
         if cache_position[0] != 0:
             pixel_values = None
             pixel_values_videos = None
 
-        # Determine whether to use inputs_embeds or input_ids for this generation step
+        # 确定此生成步骤是使用 inputs_embeds 还是 input_ids
         if inputs_embeds is not None and len(cache_position) == inputs_embeds.shape[1]:
             model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
         else:
             model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
 
-        # Prepare 4D causal attention mask for static cache
+        # 为静态缓存准备 4D 因果注意力掩码
         if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
             if model_inputs["inputs_embeds"] is not None:
                 batch_size, sequence_length, _ = inputs_embeds.shape
@@ -1517,7 +1589,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                 past_key_values=past_key_values,
             )
 
-        # Assemble all model inputs for generation
+        # 组装所有生成所需的模型输入
         model_inputs.update(
             {
                 "position_ids": position_ids,
@@ -1543,30 +1615,30 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         input_ids: torch.LongTensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Get the number of images and videos for each sample to calculate tensor separation lengths.
+        获取每个样本的图像和视频数量，用于计算张量分离长度。
 
-        These parameters are computed directly from input_ids rather than being passed through
-        the processor to avoid unpredictable impacts from interface modifications.
+        这些参数直接从 input_ids 计算，而不是通过处理器传递，
+        以避免接口修改带来的不可预测影响。
 
-        Args:
-            input_ids (torch.LongTensor): Input token IDs of shape (batch_size, sequence_length)
+        参数：
+            input_ids: 形状为 (batch_size, sequence_length) 的输入令牌 ID
 
-        Returns:
+        返回：
             tuple:
-                - image_nums (torch.LongTensor): Number of images per sample
-                - video_nums (torch.LongTensor): Number of videos per sample
+                - image_nums: 每个样本的图像数量
+                - video_nums: 每个样本的视频数量
         """
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id
 
-        # Find vision start tokens and their following tokens
+        # 查找视觉开始令牌及其后的令牌
         vision_start_mask = input_ids == vision_start_token_id
         vision_first_mask = torch.roll(vision_start_mask, shifts=1, dims=1)
         image_mask = input_ids == image_token_id
         video_mask = input_ids == video_token_id
 
-        # Count images and videos following vision start tokens
+        # 统计视觉开始令牌后的图像和视频数量
         image_nums = torch.sum(vision_first_mask & image_mask, dim=1)
         video_nums = torch.sum(vision_first_mask & video_mask, dim=1)
 
@@ -1580,27 +1652,27 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         **model_kwargs,
     ) -> tuple[torch.LongTensor, dict[str, Any]]:
         """
-        Expand inputs for generation with support for multi-modal tensors.
+        为生成过程扩展输入，支持多模态张量。
 
-        This is an overridden method that supports expanding tensors without a standard batch
-        size dimension, specifically for vision-related tensors:
-        - pixel_values.shape[0] = sum(sequence_lengths for all image samples)
-        - image_grid_thw.shape[0] = sum(num_images for all samples)
-        - Similar patterns for video tensors
+        这是一个重写方法，支持扩展没有标准批量维度的张量，
+        特别是与视觉相关的张量：
+        - pixel_values.shape[0] = sum(所有图像样本的序列长度)
+        - image_grid_thw.shape[0] = sum(所有样本的图像数量)
+        - 视频张量的类似模式
 
-        Args:
-            expand_size (int): Factor by which to expand inputs (for beam search, etc.)
-            is_encoder_decoder (bool): Whether using encoder-decoder architecture
-            input_ids (torch.LongTensor, optional): Input token IDs
-            **model_kwargs: Additional model arguments to expand
+        参数：
+            expand_size: 扩展因子（用于束搜索等）
+            is_encoder_decoder: 是否使用编码器-解码器架构
+            input_ids: 输入令牌 ID
+            **model_kwargs: 要扩展的其他模型参数
 
-        Returns:
-            tuple: (expanded_input_ids, expanded_model_kwargs)
+        返回：
+            tuple: (扩展后的 input_ids, 扩展后的 model_kwargs)
         """
         if expand_size == 1:
             return input_ids, model_kwargs
 
-        # Define keys for vision-related tensors that need special handling
+        # 定义需要特殊处理的视觉相关张量键
         visual_keys = [
             "pixel_values",
             "image_grid_thw",
@@ -1610,13 +1682,13 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
         ]
 
         def _expand_dict_for_generation_visual(dict_to_expand):
-            """Expand vision-related tensors based on image/video counts per sample."""
+            """基于每个样本的图像/视频计数扩展视觉相关张量。"""
             image_grid_thw = model_kwargs.get("image_grid_thw", None)
             video_grid_thw = model_kwargs.get("video_grid_thw", None)
             image_nums, video_nums = self._get_image_nums_and_video_nums(input_ids)
 
             def _repeat_interleave_samples(x, lengths, repeat_times):
-                """Split tensor by lengths and repeat each sample."""
+                """按长度分割张量并重复每个样本。"""
                 samples = torch.split(x, lengths)
                 repeat_args = [repeat_times] + [1] * (x.dim() - 1)
                 result = torch.cat([sample.repeat(*repeat_args) for sample in samples], dim=0)
@@ -1624,33 +1696,33 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
             for key in dict_to_expand:
                 if key == "pixel_values":
-                    # Split images into samples and compute sequence lengths
+                    # 将图像分割成样本并计算序列长度
                     samples = torch.split(image_grid_thw, list(image_nums))
                     lengths = [torch.prod(sample, dim=1).sum() for sample in samples]
                     dict_to_expand[key] = _repeat_interleave_samples(
                         dict_to_expand[key], lengths=lengths, repeat_times=expand_size
                     )
                 elif key == "image_grid_thw":
-                    # Expand based on number of images per sample
+                    # 基于每个样本的图像数量进行扩展
                     lengths = list(image_nums)
                     dict_to_expand[key] = _repeat_interleave_samples(
                         dict_to_expand[key], lengths=lengths, repeat_times=expand_size
                     )
                 elif key == "pixel_values_videos":
-                    # Split videos into samples and compute sequence lengths
+                    # 将视频分割成样本并计算序列长度
                     samples = torch.split(video_grid_thw, list(video_nums))
                     lengths = [torch.prod(sample, dim=1).sum() for sample in samples]
                     dict_to_expand[key] = _repeat_interleave_samples(
                         dict_to_expand[key], lengths=lengths, repeat_times=expand_size
                     )
                 elif key == "video_grid_thw":
-                    # Expand based on number of videos per sample
+                    # 基于每个样本的视频数量进行扩展
                     lengths = list(video_nums)
                     dict_to_expand[key] = _repeat_interleave_samples(
                         dict_to_expand[key], lengths=lengths, repeat_times=expand_size
                     )
                 elif key == "second_per_grid_ts":
-                    # Handle list-type temporal grid data
+                    # 处理列表类型的时间网格数据
                     if not isinstance(dict_to_expand[key], list):
                         raise TypeError(
                             f"Expected value for key '{key}' to be a list, but got {type(dict_to_expand[key])} instead."
@@ -1662,7 +1734,7 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
             return dict_to_expand
 
         def _expand_dict_for_generation(dict_to_expand):
-            """Expand standard tensors using repeat_interleave."""
+            """使用 repeat_interleave 扩展标准张量。"""
             for key in dict_to_expand:
                 if (
                     key != "cache_position"
@@ -1673,19 +1745,19 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
                     dict_to_expand[key] = dict_to_expand[key].repeat_interleave(expand_size, dim=0)
             return dict_to_expand
 
-        # Expand visual inputs only if input_ids is available for counting images/videos
-        # If input_ids is unavailable, visual inputs won't be used, so no expansion needed
+        # 只有在 input_ids 可用且非空时才扩展视觉输入
+        # 如果 input_ids 不可用，则不会使用视觉输入，因此无需扩展
         if input_ids is not None and input_ids.numel() != 0:
             model_kwargs = _expand_dict_for_generation_visual(model_kwargs)
 
-        # Expand input_ids using standard repeat_interleave
+        # 使用标准 repeat_interleave 扩展 input_ids
         if input_ids is not None:
             input_ids = input_ids.repeat_interleave(expand_size, dim=0)
 
-        # Expand all other model arguments
+        # 扩展所有其他模型参数
         model_kwargs = _expand_dict_for_generation(model_kwargs)
 
-        # Handle encoder-decoder specific expansion
+        # 处理编码器-解码器特定的扩展
         if is_encoder_decoder:
             if model_kwargs.get("encoder_outputs") is None:
                 raise ValueError(
@@ -1698,39 +1770,39 @@ class Qwen2_5_VLMoEForAction(Qwen2_5_VLForConditionalGeneration):
 
 class WallXPolicy(PreTrainedPolicy):
     """
-    Wall-X policy for cross-embodiment robotic control.
+    Wall-X 策略，用于跨具身机器人控制。
 
-    Integrates Qwen2.5-VL vision-language model with action prediction
-    using flow matching for continuous action spaces.
+    集成 Qwen2.5-VL 视觉语言模型与流匹配（Flow Matching）动作预测，
+    适用于连续动作空间。
     """
 
-    config_class = WallXConfig
-    name = "wall_x"
+    config_class = WallXConfig  # 关联的配置类
+    name = "wall_x"  # 策略名称
 
     def __init__(self, config: WallXConfig, **kwargs):
         super().__init__(config)
-        config.validate_features()
+        config.validate_features()  # 验证配置特性
         self.config = config
 
-        # Initialize the wall-x model
+        # 初始化 wall-x 模型
         self.model = Qwen2_5_VLMoEForAction.from_pretrained(
             pretrained_name_or_path=config.pretrained_name_or_path,
             action_tokenizer_path=config.action_tokenizer_path,
             attn_implementation=config.attn_implementation,
         )
-        self.model.to(config.device)
-        self.model.to_bfloat16_for_selected_params()
+        self.model.to(config.device)  # 移动到指定设备
+        self.model.to_bfloat16_for_selected_params()  # 将部分参数转为 bfloat16
 
-        self.reset()
+        self.reset()  # 重置动作队列
 
     def reset(self):
-        """Reset action queue."""
+        """重置动作队列。"""
         self._queues = {
-            ACTION: deque(maxlen=self.config.n_action_steps),
+            ACTION: deque(maxlen=self.config.n_action_steps),  # 动作队列，最大长度为动作步数
         }
 
     def get_optim_params(self):
-        """Get parameters for optimization."""
+        """获取优化参数。"""
         return self.parameters()
 
     def preprocess_inputs(
@@ -1738,34 +1810,34 @@ class WallXPolicy(PreTrainedPolicy):
         batch: dict[str, Any],
     ) -> BatchFeature:
         """
-        Convert a batch of LeRobot dataset items to Wall-X model input format.
+        将 LeRobot 数据集的一个批次转换为 Wall-X 模型输入格式。
 
-        This processes a batched dictionary where tensors have batch dimension first.
+        该方法处理一个批次的字典，其中张量的第一维是批次维度。
 
-        Args:
-            batch: Dictionary with batched tensors:
-                - "observation.state": (batch_size, state_dim) or (batch_size, n_obs_steps, state_dim)
+        参数：
+            batch: 包含批次张量的字典：
+                - "observation.state": (batch_size, state_dim) 或 (batch_size, n_obs_steps, state_dim)
                 - "action": (batch_size, chunk_size, action_dim)
                 - "observation.images.<key>": (batch_size, C, H, W)
-                - "task": List[str] of length batch_size
+                - "task": 长度为 batch_size 的字符串列表
 
-        Returns:
-            BatchFeature containing batched model inputs
+        返回：
+            包含批次模型输入的 BatchFeature 对象
         """
         use_fast_tokenizer = self.config.use_fast_tokenizer
 
-        # Get batch size from state tensor
+        # 从状态张量获取批次大小
         batch_size = batch[OBS_STATE].shape[0]
 
-        # ==================== PROCESS ALL SAMPLES ====================
+        # ==================== 处理所有样本 ====================
         all_image_inputs = []
         all_texts = []
 
-        # Find image keys in batch
+        # 在批次中查找图像键
         img_keys = [key for key in self.config.image_features if key in batch]
 
         for i in range(batch_size):
-            # Vision preprocessing per sample
+            # 每个样本的视觉预处理
             processed_frames = []
             orig_height, orig_width = None, None
             resized_height, resized_width = None, None
@@ -1773,13 +1845,15 @@ class WallXPolicy(PreTrainedPolicy):
             for key in img_keys:
                 current_obs = batch[key][i].clone()  # (C, H, W)
                 if current_obs.dim() == 3:
-                    current_obs = current_obs.permute(1, 2, 0)  # (H, W, C)
+                    current_obs = current_obs.permute(1, 2, 0)  # 转换为 (H, W, C)
 
+                # 将张量转换为 PIL 图像
                 img_pil = Image.fromarray((current_obs * 255).to(torch.uint8).cpu().numpy())
                 orig_width, orig_height = img_pil.size
 
                 target_size = RESOLUTION
                 if target_size != -1:
+                    # 根据目标大小调整图像尺寸
                     if orig_width > orig_height:
                         new_width = target_size
                         new_height = int(target_size * orig_height / orig_width)
@@ -1789,6 +1863,7 @@ class WallXPolicy(PreTrainedPolicy):
                     img_pil = img_pil.resize((new_width, new_height))
 
                 current_width, current_height = img_pil.size
+                # 使用 smart_resize 进行智能调整，确保尺寸是 factor 的倍数
                 resized_height, resized_width = smart_resize(
                     current_height,
                     current_width,
@@ -1801,11 +1876,12 @@ class WallXPolicy(PreTrainedPolicy):
 
             all_image_inputs.append(processed_frames)
 
-            # Text preprocessing
+            # 文本预处理
             task_text = batch["task"][i] if isinstance(batch["task"], list) else batch["task"]
             instruction_info = {"instruction": task_text}
 
             frame_index = batch["frame_index"][i] if "frame_index" in batch else 0
+            # 生成标准文本
             complete_text, _ = get_wallx_normal_text(
                 instruction_info,
                 self.config.chunk_size,
@@ -1815,18 +1891,20 @@ class WallXPolicy(PreTrainedPolicy):
                 generate_subtask_ratio=GENERATE_SUBTASK_RATIO,
             )
 
+            # 处理接地点
             text = process_grounding_points(
                 complete_text, orig_height, orig_width, resized_height, resized_width, MODEL_TYPE
             )
             all_texts.append(text)
 
-        # ==================== PROCESS AGENT POS ====================
+        # ==================== 处理智能体位置 ====================
         agent_pos = batch[OBS_STATE]  # (batch_size, state_dim)
         if agent_pos.dim() == 2:
-            agent_pos = agent_pos.unsqueeze(1)  # (batch_size, 1, state_dim)
-        agent_pos_mask = (~torch.isnan(agent_pos)).float()
-        agent_pos = agent_pos.nan_to_num(nan=0.0)
+            agent_pos = agent_pos.unsqueeze(1)  # 添加时间维度 (batch_size, 1, state_dim)
+        agent_pos_mask = (~torch.isnan(agent_pos)).float()  # 有效位置掩码
+        agent_pos = agent_pos.nan_to_num(nan=0.0)  # 将 NaN 替换为 0
 
+        # 将智能体位置填充到固定维度 20
         if agent_pos.shape[-1] != 20:
             pad_size = 20 - agent_pos.shape[-1]
             agent_pos = torch.cat(
@@ -1849,14 +1927,15 @@ class WallXPolicy(PreTrainedPolicy):
                 dim=-1,
             )
 
-        # ==================== PROCESS ACTIONS ====================
+        # ==================== 处理动作 ====================
         action = batch.get(ACTION)  # (batch_size, chunk_size, action_dim)
         if action is not None:
             if action.dim() == 2:
-                action = action.unsqueeze(1)
-            dof_mask = (~torch.isnan(action)).float()
-            action = action.nan_to_num(nan=0.0)
+                action = action.unsqueeze(1)  # 添加时间维度
+            dof_mask = (~torch.isnan(action)).float()  # 有效自由度掩码
+            action = action.nan_to_num(nan=0.0)  # 将 NaN 替换为 0
 
+            # 将动作填充到固定维度 20
             if action.shape[-1] != 20:
                 pad_size = 20 - action.shape[-1]
                 action = torch.cat(
@@ -1871,6 +1950,7 @@ class WallXPolicy(PreTrainedPolicy):
                     dim=-1,
                 )
         else:
+            # 如果没有动作数据，则创建全有效掩码和零动作
             action_dim = self.config.output_features[ACTION].shape[0]
             dof_mask = torch.cat(
                 [
@@ -1884,7 +1964,7 @@ class WallXPolicy(PreTrainedPolicy):
                 dim=-1,
             )
 
-        # ==================== ACTION TOKEN REPLACEMENT ====================
+        # ==================== 动作令牌替换 ====================
         all_texts = replace_action_token(
             all_texts,
             action,
@@ -1892,7 +1972,7 @@ class WallXPolicy(PreTrainedPolicy):
             dof_mask,
         )
 
-        # ==================== TOKENIZATION ====================
+        # ==================== 分词 ====================
         inputs = preprocesser_call(
             processor=self.model.processor,
             text=all_texts,
@@ -1904,9 +1984,9 @@ class WallXPolicy(PreTrainedPolicy):
             max_length=TOKENIZER_MAX_LENGTH,
         )
 
-        # ==================== ADDITIONAL INPUTS ====================
+        # ==================== 添加额外输入 ====================
         action_token_id = self.model.processor.tokenizer.convert_tokens_to_ids("<|action|>")
-        moe_token_types = inputs.input_ids == action_token_id
+        moe_token_types = inputs.input_ids == action_token_id  # 标记哪些位置是动作令牌
 
         inputs["proprioception"] = agent_pos
         inputs["agent_pos_mask"] = agent_pos_mask
@@ -1919,7 +1999,7 @@ class WallXPolicy(PreTrainedPolicy):
             else torch.zeros(batch_size, device=batch[OBS_STATE].device)
         )
 
-        # Move all tensors to the correct device
+        # 将所有张量移动到正确的设备
         device = self.config.device
         for key, value in inputs.items():
             if isinstance(value, torch.Tensor):
@@ -1929,25 +2009,26 @@ class WallXPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """
-        Training forward pass using Qwen2_5_VLMoEForAction.
+        使用 Qwen2_5_VLMoEForAction 进行训练前向传播。
 
-        Args:
-            batch: Dictionary containing preprocessed inputs from preprocess_inputs()
-                   Expected keys: input_ids, attention_mask, pixel_values, image_grid_thw,
-                   proprioception, agent_pos_mask, action_chunk, dof_mask, moe_token_types,
-                   etc.
+        参数：
+            batch: 包含 preprocess_inputs() 预处理输入的字典
+                   预期键：input_ids, attention_mask, pixel_values, image_grid_thw,
+                   proprioception, agent_pos_mask, action_chunk, dof_mask, moe_token_types 等。
 
-        Returns:
+        返回：
             tuple: (loss, loss_dict)
         """
         batch = self.preprocess_inputs(
             batch,
         )
 
-        # Call the underlying model's forward with mode="train"
+               
+        # 调用底层模型的前向传播，模式为 "train"
         outputs = self.model(**batch, mode="train")
+        # outputs = self.model(**batch, mode="predict", predict_mode="text")
 
-        # Extract losses from output
+        # 从输出中提取损失
         loss = outputs.loss
         loss_dict = {
             "loss": loss.item() if loss is not None else 0.0,
@@ -1958,7 +2039,7 @@ class WallXPolicy(PreTrainedPolicy):
         if outputs.cross_entropy_loss is not None:
             loss_dict["cross_entropy_loss"] = outputs.cross_entropy_loss.item()
 
-        # Add channel losses if available
+        # 如果存在通道损失，则添加到字典
         if outputs.channel_loss_dict is not None:
             for key, value in outputs.channel_loss_dict.items():
                 if isinstance(value, torch.Tensor):
@@ -1968,14 +2049,16 @@ class WallXPolicy(PreTrainedPolicy):
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
-        """Predict action chunk for evaluation."""
+        """评估阶段预测动作块。"""
         self.eval()
+        # 填充动作队列（排除动作本身）
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
         batch = self.preprocess_inputs(
             batch,
         )
 
+        # 根据配置选择预测模式
         if self.config.prediction_mode == "diffusion":
             output = self.model(
                 **batch,
@@ -1995,10 +2078,10 @@ class WallXPolicy(PreTrainedPolicy):
         else:
             raise NotImplementedError(f"Prediction mode {self.config.prediction_mode} not implemented")
 
-        # Extract action tensor from output dictionary
+        # 从输出字典中提取动作张量
         actions = output["predict_action"]
 
-        # Unpad actions to actual action dimension
+        # 去除填充，恢复实际动作维度
         action_dim = self.config.output_features[ACTION].shape[0]
         actions = actions[:, :, :action_dim]
 
@@ -2006,13 +2089,16 @@ class WallXPolicy(PreTrainedPolicy):
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Tensor]) -> Tensor:
-        """Select single action for environment execution."""
+        """为环境执行选择单个动作。"""
         self.eval()
         self._queues = populate_queues(self._queues, batch, exclude_keys=[ACTION])
 
-        # Use action queue
+        # 使用动作队列
         if len(self._queues[ACTION]) == 0:
+            # 预测一个动作块
             actions = self.predict_action_chunk(batch)
+            # 将动作块按时间步拆分并扩展到队列中
             self._queues[ACTION].extend(actions.transpose(0, 1)[: self.config.n_action_steps])
 
+        # 从队列中弹出一个动作
         return self._queues[ACTION].popleft()
