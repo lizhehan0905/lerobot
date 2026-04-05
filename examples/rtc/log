@@ -1,0 +1,107 @@
+python examples/rtc/eval_with_real_robot.py --policy.path=/home/hpc/VLA/lerobot_models/pi05/1_16_data342/last/pretrained_model --robot.type=single_piper --robot.port="" --robot.cameras="{wrist: {type: opencv, index_or_path: 12, width: 640, height: 480, fps: 30},top: {type: opencv, index_or_path: 4, width: 640, height: 480, fps: 30}}" --task="You are a parcel sorter. Please pick up the packages and place them on the sorting table with the shipping labels facing up." --duration=120000 --device=cuda --rtc.enabled=true --rtc.debug=true --rtc.execution_horizon=30 
+INFO 2026-01-26 15:10:49 al_robot.py:728 Using device: cuda
+The PI05 model is a direct port of the OpenPI implementation. 
+This implementation follows the original OpenPI structure for compatibility. 
+Original implementation: https://github.com/Physical-Intelligence/openpi
+INFO 2026-01-26 15:12:12 ing_pi05.py:594 Enabled gradient checkpointing for PI05Pytorch model
+Loading model from: /home/hpc/VLA/lerobot_models/pi05/1_16_data342/last/pretrained_model
+✓ Loaded state dict from model.safetensors
+WARNING 2026-01-26 15:12:14 ng_pi05.py:1116 Vision embedding key might need handling: model.paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.bias
+WARNING 2026-01-26 15:12:14 ng_pi05.py:1116 Vision embedding key might need handling: model.paligemma_with_expert.paligemma.model.vision_tower.vision_model.embeddings.patch_embedding.weight
+Warning: Could not remap state dict keys: Error(s) in loading state_dict for PI05Policy:
+        Missing key(s) in state_dict: "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight". 
+INFO 2026-01-26 15:12:18 al_robot.py:795 Initializing robot: single_piper
+can1  is exist
+can1  is UP
+can1  bitrate is  1000000
+INFO 2026-01-26 15:12:18 ocketcan.py:587 Created a socket
+can1 bus opened successfully.
+INFO 2026-01-26 15:12:19 a_opencv.py:180 OpenCVCamera(12) connected.
+INFO 2026-01-26 15:12:20 a_opencv.py:180 OpenCVCamera(4) connected.
+INFO 2026-01-26 15:12:20 le_piper.py:124 None SinglePiper connected.
+--------------------
+使能状态: True
+--------------------
+INFO 2026-01-26 15:12:21 al_robot.py:365 [GET_ACTIONS] Starting get actions thread
+提取的特征
+  joint_1.pos: (type: <class 'type'>)
+  joint_2.pos: (type: <class 'type'>)
+INFO 2026-01-26 15:12:21 al_robot.py:822 Started get actions thread
+  joint_3.pos: (type: <class 'type'>)
+  joint_4.pos: (type: <class 'type'>)
+  joint_5.pos: (type: <class 'type'>)
+  joint_6.pos: (type: <class 'type'>)
+  gripper.pos: (type: <class 'type'>)
+  end_x.epos: (type: <class 'type'>)
+  end_y.epos: (type: <class 'type'>)
+  end_z.epos: (type: <class 'type'>)
+  end_roll.epos: (type: <class 'type'>)
+  end_pitch.epos: (type: <class 'type'>)
+  end_yaw.epos: (type: <class 'type'>)
+  end_gripper.epos: (type: <class 'type'>)
+  wrist: (type: <class 'tuple'>)
+  top: (type: <class 'tuple'>)
+INFO 2026-01-26 15:12:21 al_robot.py:383 [GET_ACTIONS] Loading preprocessor/postprocessor from /home/hpc/VLA/lerobot_models/pi05/1_16_data342/last/pretrained_model
+INFO 2026-01-26 15:12:21 al_robot.py:594 [ACTOR] Starting actor thread
+INFO 2026-01-26 15:12:21 al_robot.py:832 Started actor thread
+INFO 2026-01-26 15:12:21 al_robot.py:834 Started stop by duration thread
+INFO 2026-01-26 15:12:21 al_robot.py:838 Running demo for 120000.0 seconds...
+INFO 2026-01-26 15:12:21 al_robot.py:410 [GET_ACTIONS] Preprocessor/postprocessor loaded successfully with embedded stats
+WARNING 2026-01-26 15:12:22 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:22 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 0, real delay: 26
+WARNING 2026-01-26 15:12:23 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:23 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:24 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:25 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:25 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:25 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 9, real delay: 10
+WARNING 2026-01-26 15:12:26 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:26 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 8, real delay: 9
+WARNING 2026-01-26 15:12:27 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:27 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:28 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:29 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:29 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:30 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:31 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:31 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 8, real delay: 9
+INFO 2026-01-26 15:12:31 al_robot.py:848 [MAIN] Action queue size: 37
+WARNING 2026-01-26 15:12:32 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:32 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 8, real delay: 9
+WARNING 2026-01-26 15:12:32 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:33 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:34 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:34 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:35 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:36 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:36 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:37 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:38 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:38 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:38 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 9, real delay: 10
+WARNING 2026-01-26 15:12:39 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:40 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:40 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:40 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 8, real delay: 9
+INFO 2026-01-26 15:12:41 al_robot.py:848 [MAIN] Action queue size: 25
+WARNING 2026-01-26 15:12:41 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:42 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:42 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 9, real delay: 10
+WARNING 2026-01-26 15:12:42 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:42 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 8, real delay: 9
+WARNING 2026-01-26 15:12:43 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:43 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 9, real delay: 10
+WARNING 2026-01-26 15:12:44 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+^CINFO 2026-01-26 15:12:44 l/process.py:61  Shutdown signal 2 received. Cleaning up…
+INFO 2026-01-26 15:12:44 al_robot.py:644 [ACTOR] Actor thread shutting down. Total actions executed: 675
+WARNING 2026-01-26 15:12:45 al_robot.py:544 [GET_ACTIONS] cfg.action_queue_size_to_get_new_actions Too small, It should be higher than inference delay + execution horizon.
+WARNING 2026-01-26 15:12:45 on_queue.py:223 [ACTION_QUEUE] Indexes diff is not equal to real delay. Indexes diff: 1, real delay: 10
+INFO 2026-01-26 15:12:45 al_robot.py:558 [GET_ACTIONS] get actions thread shutting down
+INFO 2026-01-26 15:12:51 al_robot.py:848 [MAIN] Action queue size: 40
+INFO 2026-01-26 15:12:51 al_robot.py:854 Demo duration reached or shutdown requested
+INFO 2026-01-26 15:12:51 a_opencv.py:541 OpenCVCamera(12) disconnected.
+INFO 2026-01-26 15:12:51 a_opencv.py:541 OpenCVCamera(4) disconnected.
+INFO 2026-01-26 15:12:51 le_piper.py:351 None SinglePiper disconnected.
+INFO 2026-01-26 15:12:51 al_robot.py:874 Robot disconnected
+INFO 2026-01-26 15:12:51 al_robot.py:876 Cleanup completed
+INFO 2026-01-26 15:12:51 al_robot.py:881 RTC demo finished

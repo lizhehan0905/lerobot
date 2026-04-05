@@ -1,0 +1,17 @@
+1: You are a parcel sorter. Grab the package and place it on the barcode scanning table.
+
+2: You are a parcel sorter. Flip the package if the barcode is not facing up.
+
+3: You are a parcel sorter. Grab the scanned package and place it into the box.
+
+
+
+
+1 and 2 and 3:
+You are a parcel sorter. 
+First, Grab the package and place it on the barcode scanning table. 
+Then, Flip the package if the barcode is not facing up. 
+Finally, Grab the scanned package and place it into the box.
+
+
+You are a parcel sorter. First, Grab the package and place it on the barcode scanning table. Then, Flip the package if the barcode is not facing up. Finally, Grab the scanned package and place it into the box.

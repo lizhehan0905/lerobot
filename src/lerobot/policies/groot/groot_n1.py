@@ -172,23 +172,39 @@ ERROR_MSG = "Error: unexpected input/output"
 N_COLOR_CHANNELS = 3
 
 
-# config
+# # config
+# @dataclass
+# class GR00TN15Config(PretrainedConfig):
+#     model_type = "gr00t_n1_5"
+#     backbone_cfg: dict = field(init=False, metadata={"help": "Backbone configuration."})
+
+#     action_head_cfg: dict = field(init=False, metadata={"help": "Action head configuration."})
+
+#     action_horizon: int = field(init=False, metadata={"help": "Action horizon."})
+
+#     action_dim: int = field(init=False, metadata={"help": "Action dimension."})
+#     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
+
+#     def __init__(self, **kwargs):
+#         super().__init__(**kwargs)
+#         for key, value in kwargs.items():
+#             setattr(self, key, value)
 @dataclass
 class GR00TN15Config(PretrainedConfig):
     model_type = "gr00t_n1_5"
-    backbone_cfg: dict = field(init=False, metadata={"help": "Backbone configuration."})
-
-    action_head_cfg: dict = field(init=False, metadata={"help": "Action head configuration."})
-
-    action_horizon: int = field(init=False, metadata={"help": "Action horizon."})
-
-    action_dim: int = field(init=False, metadata={"help": "Action dimension."})
+    
+    # 所有字段都有默认值，顺序无关紧要
+    backbone_cfg: dict = field(default=None, init=False, metadata={"help": "Backbone configuration."})
+    action_head_cfg: dict = field(default=None, init=False, metadata={"help": "Action head configuration."})
+    action_horizon: int = field(default=0, init=False, metadata={"help": "Action horizon."})
+    action_dim: int = field(default=0, init=False, metadata={"help": "Action dimension."})
     compute_dtype: str = field(default="float32", metadata={"help": "Compute dtype."})
-
+    
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         for key, value in kwargs.items():
             setattr(self, key, value)
+
 
 
 # real model

@@ -1,0 +1,41 @@
+  def _execute_action(self):
+        """动作执行线程函数（独立线程，保证控制实时性）"""
+        last_queue_len = 1000
+        is_new_batch = False
+        while self.running:
+            start_t = time.perf_counter()
+            position = None
+            raw_action = None
+            try:
+                # 获取动作数据，阻塞等待，直到有数据
+                while self.running:
+                    with self.position_queue_lock:
+                        if self.position_queue:
+                            is_new_batch = False
+                            if last_queue_len < len(self.position_queue):
+                                is_new_batch = True
+                            last_queue_len = len(self.position_queue)
+                            position = self.position_queue.popleft()
+                            raw_action = self.raw_action_queue.popleft()
+                            break
+                    time.sleep(0.001)
+                if not self.running:
+                    break
+
+                self.second_to_last_executed_action = self.last_executed_action
+                self.last_executed_action = raw_action
+
+                # 执行动作
+                print(f"{'new ' if is_new_batch else ''}{position}")
+                self._execute_robot_action(position)
+
+                # 控制执行频率
+                dt = time.perf_counter() - start_t
+                # print(f"execute end. cost time:{dt}")
+                wait_time = self.EXECUTION_PERIOD - dt
+                if wait_time > 0:
+                    busy_wait(wait_time)
+
+            except Exception as e:
+                print(f"动作执行线程异常: {e}")
+                time.sleep(0.001)

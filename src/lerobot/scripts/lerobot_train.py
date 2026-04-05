@@ -343,7 +343,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    # 如果设置了test_mode，则禁用shuffle以保持数据顺序
+    if hasattr(cfg.policy, "test_mode") and cfg.policy.test_mode is not None:
+        shuffle = False
+        sampler = None
+    elif hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
